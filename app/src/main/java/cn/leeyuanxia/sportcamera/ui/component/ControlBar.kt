@@ -27,7 +27,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import cn.leeyuanxia.sportcamera.domain.AppState
-import cn.leeyuanxia.sportcamera.domain.model.CameraLens
 import cn.leeyuanxia.sportcamera.domain.model.PreRecordDuration
 import cn.leeyuanxia.sportcamera.domain.model.RecordOrientation
 import cn.leeyuanxia.sportcamera.domain.model.ResolutionProfile
@@ -51,8 +50,6 @@ import cn.leeyuanxia.sportcamera.ui.theme.ChipUnselected
 fun ControlBar(
     appState: AppState,
     selectedDuration: PreRecordDuration,
-    availableLenses: List<CameraLens>,
-    currentLens: CameraLens,
     selectedProfile: ResolutionProfile,
     selectedOrientation: RecordOrientation,
     previewVisible: Boolean,
@@ -61,7 +58,6 @@ fun ControlBar(
     onPeekPreview: () -> Unit,
     onToggleUi: () -> Unit,
     onDurationChanged: (PreRecordDuration) -> Unit,
-    onLensSwitch: (CameraLens) -> Unit,
     onResolutionChanged: (ResolutionProfile) -> Unit,
     onOrientationChanged: (RecordOrientation) -> Unit,
     onRequestBatteryOptimization: () -> Unit,
@@ -79,7 +75,7 @@ fun ControlBar(
     ) {
         // ===== 待机模式：精简控制 =====
         if (isStandby) {
-            // 上排：窥视预览 + UI 隐藏 + 电池优化 + 停止
+            // 上排：窥视预览 + 镜头切换 + UI 隐藏 + 停止
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -87,13 +83,13 @@ fun ControlBar(
             ) {
                 // 窥视预览按钮
                 ActionChip(
-                    label = if (previewVisible) "👁 预览中" else "👁 预览",
+                    label = if (previewVisible) "👁 关闭" else "👁 预览",
                     onClick = onPeekPreview,
                 )
 
                 // UI 隐藏按钮（省电）
                 ActionChip(
-                    label = "🌑 隐藏界面",
+                    label = "🌑 隐藏",
                     onClick = onToggleUi,
                 )
 
@@ -214,17 +210,6 @@ fun ControlBar(
                 }
 
                 Spacer(Modifier.width(8.dp))
-
-                if (availableLenses.size > 1) {
-                    val nextLens = when (currentLens) {
-                        CameraLens.WIDE -> CameraLens.ULTRA_WIDE
-                        CameraLens.ULTRA_WIDE -> CameraLens.WIDE
-                    }
-                    ActionChip(
-                        label = "🔄 ${nextLens.label}",
-                        onClick = { onLensSwitch(nextLens) },
-                    )
-                }
 
                 // 电池优化白名单（未优化时显示）
                 if (needsBatteryOptimization && isIdle) {

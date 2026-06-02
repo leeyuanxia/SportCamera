@@ -7,6 +7,7 @@ import androidx.core.content.ContextCompat
 import cn.leeyuanxia.sportcamera.domain.model.PreRecordDuration
 import cn.leeyuanxia.sportcamera.domain.model.RecordOrientation
 import cn.leeyuanxia.sportcamera.domain.model.ResolutionProfile
+import cn.leeyuanxia.sportcamera.hardware.audio.AudioRecorder
 import cn.leeyuanxia.sportcamera.hardware.audio.KwsManager
 import cn.leeyuanxia.sportcamera.hardware.camera.ActiveRecorder
 import cn.leeyuanxia.sportcamera.hardware.camera.CameraFramePipeline
@@ -189,10 +190,17 @@ class VoiceTriggerRecorder(
                 // 连接帧管线到 ActiveRecorder
                 framePipeline.setEncoder(activeRecorder)
 
+                // Phase 2: 创建音频录制器
+                val audioRecorder = AudioRecorder()
+                audioRecorder.prepare()
+                audioRecorder.start()
+
                 val startTime = System.currentTimeMillis()
 
                 // Phase 2.5: 录制后半段（5 次/秒进度更新，降低 UI 重组频率）
                 val drainJob = launch { activeRecorder.drainEncoder() }
+                val audioCaptureJob = launch { audioRecorder.captureAndEncode() }
+                val audioDrainJob = launch { audioRecorder.drainEncoder() }
                 while (System.currentTimeMillis() - startTime < postDurationMs) {
                     delay(200)
                     val postElapsed = System.currentTimeMillis() - startTime
@@ -204,6 +212,9 @@ class VoiceTriggerRecorder(
                 // 安全关闭编码器
                 activeRecorder.signalEndOfStream()
 
+                // 停止音频录制
+                audioRecorder.stop()
+
                 val drainTimeout = withTimeoutOrNull(postDurationMs + 2000) {
                     drainJob.join()
                 }
@@ -214,6 +225,13 @@ class VoiceTriggerRecorder(
 
                 val postFrames = activeRecorder.getAllFrames()
                 Log.d(TAG, "后录帧: ${postFrames.size} 帧")
+
+                // 等待音频编码完成
+                withTimeoutOrNull(3000) {
+                    audioDrainJob.join()
+                }
+                val audioFrames = audioRecorder.getEncodedFrames()
+                Log.d(TAG, "音频帧: ${audioFrames.size} 帧")
 
                 // Phase 3: 断开帧管线，合成视频
                 framePipeline.setEncoder(null)
@@ -232,6 +250,8 @@ class VoiceTriggerRecorder(
                 val result = assembler.assemble(
                     preFrames = preFrames,
                     postFrames = postFrames,
+                    audioFrames = audioFrames,
+                    audioStartTimeUs = audioRecorder.startTimeUs,
                     duration = currentDuration,
                     profile = currentProfile,
                     orientation = currentOrientation,

@@ -269,7 +269,15 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun switchLens(lens: CameraLens) {
         viewModelScope.launch {
+            // 持久化设置
             settingsRepo.setCameraLens(lens)
+            // 实际切换摄像头（重新绑定 CameraX）
+            val switched = cameraController.switchLens(lens)
+            if (switched != null) {
+                Log.d(TAG, "镜头已切换: $switched")
+            } else {
+                Log.w(TAG, "镜头切换失败 — 相机尚未绑定")
+            }
         }
     }
 

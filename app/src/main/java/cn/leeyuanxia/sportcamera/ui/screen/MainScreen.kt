@@ -128,14 +128,10 @@ fun MainScreen(viewModel: CameraViewModel) {
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black)
-                // UI 隐藏时，点击屏幕唤醒 UI
-                .then(
-                    if (!uiVisible) {
-                        Modifier.pointerInput(Unit) {
-                            detectTapGestures { viewModel.showUi() }
-                        }
-                    } else Modifier
-                ),
+                // 点击预览画面切换 UI 显示/隐藏
+                .pointerInput(Unit) {
+                    detectTapGestures { viewModel.toggleUi() }
+                },
         ) {
             // Layer 1: 相机预览（条件显示）
             // 不论是否可见，CameraPreview 始终存在（保持 CameraX 绑定）
@@ -165,7 +161,7 @@ fun MainScreen(viewModel: CameraViewModel) {
                     )
                 }
 
-                // Layer 3: 顶部状态栏
+                // Layer 3: 顶部状态栏 + 镜头切换
                 StatusBar(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
@@ -177,8 +173,10 @@ fun MainScreen(viewModel: CameraViewModel) {
                         ),
                     appState = appState,
                     preRecordDuration = preRecordDuration,
-                    selectedLens = currentLens,
+                    availableLenses = availableLenses,
+                    currentLens = currentLens,
                     batteryLevel = batteryLevel,
+                    onLensSwitch = viewModel::switchLens,
                 )
 
                 // Layer 4: 中央录制指示器
@@ -195,8 +193,6 @@ fun MainScreen(viewModel: CameraViewModel) {
                         .navigationBarsPadding(),
                     appState = appState,
                     selectedDuration = preRecordDuration,
-                    availableLenses = availableLenses,
-                    currentLens = currentLens,
                     selectedProfile = resolutionProfile,
                     selectedOrientation = recordOrientation,
                     previewVisible = previewVisible,
@@ -205,7 +201,6 @@ fun MainScreen(viewModel: CameraViewModel) {
                     onPeekPreview = viewModel::peekPreview,
                     onToggleUi = viewModel::toggleUi,
                     onDurationChanged = viewModel::setPreRecordDuration,
-                    onLensSwitch = viewModel::switchLens,
                     onResolutionChanged = viewModel::setResolutionProfile,
                     onOrientationChanged = viewModel::setRecordOrientation,
                     onRequestBatteryOptimization = {
@@ -242,7 +237,7 @@ private fun PermissionGate(
         )
     }
 
-    var hasNotified by remember { mutableStateOf(allGranted) }
+    var hasNotified by remember { mutableStateOf(false) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()

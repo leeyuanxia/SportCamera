@@ -3,6 +3,7 @@ package cn.leeyuanxia.sportcamera.hardware.storage
 import android.content.ContentValues
 import android.content.Context
 import android.media.MediaCodec
+import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.net.Uri
@@ -11,6 +12,7 @@ import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import android.util.Log
+import cn.leeyuanxia.sportcamera.hardware.audio.AudioRecorder
 import cn.leeyuanxia.sportcamera.hardware.camera.RingBufferRecorder
 import cn.leeyuanxia.sportcamera.hardware.camera.RingBufferRecorder.Companion.isConfigFrame
 import java.nio.ByteBuffer
@@ -55,9 +57,20 @@ class VideoStorageManager(private val context: Context) {
         return VideoOutput(uri, pfd)
     }
 
+    /**
+     * 合成 MP4（视频 + 音频）
+     *
+     * 时间戳同步策略：
+     * - 视频帧 PTS 来自相机硬件时钟，归一化从 0 开始
+     * - 音频帧 PTS 来自 System.nanoTime()，需要映射到视频时间轴
+     * - 映射方式：audioPtsUs - audioStartTimeUs + videoFirstFramePtsUs - baseTimeUs
+     * - 简化：videoFirstFramePtsUs == baseTimeUs，所以偏移 = audioPtsUs - audioStartTimeUs
+     */
     fun assembleToMp4(
         preFrames: List<RingBufferRecorder.EncodedFrame>,
         postFrames: List<RingBufferRecorder.EncodedFrame>,
+        audioFrames: List<AudioRecorder.EncodedAudioFrame>,
+        audioStartTimeUs: Long,
         output: VideoOutput,
         width: Int,
         height: Int,
@@ -83,35 +96,48 @@ class VideoStorageManager(private val context: Context) {
             ?: preFrames.firstOrNull { it.isConfigFrame() }?.data
         val csd1 = csd1Data?.takeIf { it.isNotEmpty() }
 
-        Log.d(TAG, "合成: pre=${preFrames.size}, post=${postFrames.size}, data=${dataFrames.size}, ${width}x${height}, csd0=${csd0?.size ?: 0}B, csd1=${csd1?.size ?: 0}B")
+        Log.d(TAG, "合成: pre=${preFrames.size}, post=${postFrames.size}, data=${dataFrames.size}, audio=${audioFrames.size}, ${width}x${height}")
 
         val muxer = MediaMuxer(output.pfd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
         var muxSuccess = false
 
         try {
+            // 1. 添加视频轨
             val videoFormat = MediaFormat.createVideoFormat(
                 MediaFormat.MIMETYPE_VIDEO_AVC, width, height
             )
-
             if (csd0 != null) {
                 videoFormat.setByteBuffer("csd-0", ByteBuffer.wrap(csd0))
-                Log.d(TAG, "csd-0 已设置: ${csd0.size}B")
             }
             if (csd1 != null) {
                 videoFormat.setByteBuffer("csd-1", ByteBuffer.wrap(csd1))
-                Log.d(TAG, "csd-1 已设置: ${csd1.size}B")
             }
+            val videoTrackIndex = muxer.addTrack(videoFormat)
 
-            val trackIndex = muxer.addTrack(videoFormat)
+            // 2. 添加音频轨（如果有音频帧）
+            val audioTrackIndex = if (audioFrames.isNotEmpty()) {
+                val audioFormat = MediaFormat.createAudioFormat(
+                    MediaFormat.MIMETYPE_AUDIO_AAC, 44100, 1
+                ).apply {
+                    setInteger(MediaFormat.KEY_BIT_RATE, 128_000)
+                    setInteger(
+                        MediaFormat.KEY_AAC_PROFILE,
+                        MediaCodecInfo.CodecProfileLevel.AACObjectLC
+                    )
+                }
+                muxer.addTrack(audioFormat).also {
+                    Log.d(TAG, "音频轨已添加: index=$it, ${audioFrames.size} 帧")
+                }
+            } else -1
 
-            // 竖屏录制时设置旋转提示，播放器自动转 90°
+            // 竖屏录制时设置旋转提示
             if (rotation != 0) {
                 muxer.setOrientationHint(rotation)
-                Log.d(TAG, "rotation 已设置: ${rotation}°")
             }
 
             muxer.start()
 
+            // 3. 写入视频帧（PTS 归一化从 0 开始）
             val baseTimeUs = dataFrames.first().presentationTimeUs
             var processed = 0
             var lastPtsUs = -1L
@@ -130,15 +156,38 @@ class VideoStorageManager(private val context: Context) {
                     flags = frame.flags
                 }
 
-                muxer.writeSampleData(trackIndex, ByteBuffer.wrap(frame.data), bufferInfo)
+                muxer.writeSampleData(videoTrackIndex, ByteBuffer.wrap(frame.data), bufferInfo)
                 processed++
-                onProgress(processed.toFloat() / dataFrames.size)
+                onProgress(processed.toFloat() / (dataFrames.size + audioFrames.size))
             }
 
-            Log.d(TAG, "写入完成: ${processed}帧, 准备 stop")
+            // 4. 写入音频帧（PTS 映射到视频时间轴）
+            if (audioTrackIndex >= 0 && audioFrames.isNotEmpty()) {
+                var audioLastPtsUs = lastPtsUs
+                for (audioFrame in audioFrames) {
+                    // 映射：音频 PTS 相对于录制开始时刻的偏移
+                    val audioOffsetUs = audioFrame.presentationTimeUs - audioStartTimeUs
+                    if (audioOffsetUs < 0) continue
+
+                    val writePtsUs = if (audioOffsetUs <= audioLastPtsUs) audioLastPtsUs + 1 else audioOffsetUs
+                    audioLastPtsUs = writePtsUs
+
+                    val bufferInfo = MediaCodec.BufferInfo().apply {
+                        offset = 0
+                        size = audioFrame.data.size
+                        presentationTimeUs = writePtsUs
+                        flags = audioFrame.flags
+                    }
+
+                    muxer.writeSampleData(audioTrackIndex, ByteBuffer.wrap(audioFrame.data), bufferInfo)
+                    processed++
+                    onProgress(processed.toFloat() / (dataFrames.size + audioFrames.size))
+                }
+            }
+
+            Log.d(TAG, "写入完成: ${processed}帧 (${dataFrames.size} 视频 + ${audioFrames.size} 音频)")
             muxer.stop()
             muxSuccess = true
-            Log.d(TAG, "合成完成: ${processed}帧")
         } catch (e: Exception) {
             Log.e(TAG, "合成失败", e)
             try { context.contentResolver.delete(output.uri, null, null) } catch (_: Exception) {}
@@ -146,7 +195,6 @@ class VideoStorageManager(private val context: Context) {
             try { muxer.release() } catch (_: Exception) {}
             try { output.pfd.close() } catch (_: Exception) {}
 
-            // 成功时标记为完成
             if (muxSuccess) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     try {
