@@ -3,7 +3,7 @@ package cn.leeyuanxia.sportcamera.domain.model
 /**
  * 录像分辨率/帧率档位（用户可选）
  *
- * 待机时统一使用低功耗 720p@15fps，
+ * 待机时统一使用低功耗 720p@30fps，
  * 唤醒后切换到用户选择的档位。
  */
 enum class ResolutionProfile(
@@ -31,8 +31,8 @@ enum class ResolutionProfile(
     companion object {
         val STANDBY_WIDTH = 1280
         val STANDBY_HEIGHT = 720
-        val STANDBY_FPS = 15
-        val STANDBY_BITRATE = 1_500_000
+        val STANDBY_FPS = 30
+        val STANDBY_BITRATE = 3_000_000
         val DEFAULT = FHD_1080P_30
     }
 }

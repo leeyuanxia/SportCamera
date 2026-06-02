@@ -35,11 +35,20 @@ class KwsManager(private val assetManager: AssetManager) {
         const val SAMPLE_RATE = 16000
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
-        private const val READ_INTERVAL_MS = 100L // 100ms 读取间隔，省电
+        private const val DEFAULT_READ_INTERVAL_MS = 100L // 默认 100ms 读取间隔
         private const val MODEL_DIR = "onnx-kws"
+    }
 
-        /** 读取帧数 = 采样率 × 间隔秒数 */
-        private val READ_SIZE = (SAMPLE_RATE * READ_INTERVAL_MS / 1000).toInt()
+    /**
+     * 动态读取间隔（由 ThermalThrottler 控制）
+     * Normal=100ms, Severe=300ms, Emergency=800ms
+     */
+    @Volatile
+    var readIntervalMs: Long = DEFAULT_READ_INTERVAL_MS
+        private set
+
+    fun updateReadInterval(ms: Long) {
+        readIntervalMs = ms
     }
 
     private lateinit var spotter: KeywordSpotter
@@ -105,14 +114,28 @@ class KwsManager(private val assetManager: AssetManager) {
         audioRecord?.startRecording()
         isListening = true
 
-        val buffer = ShortArray(READ_SIZE)
+        val maxReadSize = SAMPLE_RATE // 最大 1 秒的采样数
+        val buffer = ShortArray(maxReadSize)
+        var samplesBuffer = FloatArray(maxReadSize)
 
         // 持续读取麦克风数据并喂入 KWS 解码器
         while (isListening) {
-            val read = audioRecord?.read(buffer, 0, buffer.size) ?: -1
+            val currentInterval = readIntervalMs
+            val readSize = (SAMPLE_RATE * currentInterval / 1000).toInt().coerceIn(1, maxReadSize)
+            val read = audioRecord?.read(buffer, 0, readSize) ?: -1
             if (read > 0) {
-                // Short → Float 转换（PCM 16-bit 范围 -32768~32767）
-                val samples = FloatArray(read) { i -> buffer[i] / 32768.0f }
+                // Short → Float 转换
+                // acceptWaveform 需要精确大小的 FloatArray，按需分配
+                val samples = if (read == samplesBuffer.size) {
+                    samplesBuffer
+                } else {
+                    FloatArray(read).also { newArr ->
+                        System.arraycopy(samplesBuffer, 0, newArr, 0, read)
+                    }
+                }
+                for (i in 0 until read) {
+                    samples[i] = buffer[i] / 32768.0f
+                }
                 stream?.acceptWaveform(samples, SAMPLE_RATE)
 
                 // 解码：只要 spotter 有足够数据就继续解码
@@ -132,6 +155,10 @@ class KwsManager(private val assetManager: AssetManager) {
                 }
             } else {
                 delay(10) // 避免空转
+            }
+            // 读取间隔由热管理动态控制
+            if (currentInterval > DEFAULT_READ_INTERVAL_MS) {
+                delay(currentInterval - DEFAULT_READ_INTERVAL_MS)
             }
         }
     }

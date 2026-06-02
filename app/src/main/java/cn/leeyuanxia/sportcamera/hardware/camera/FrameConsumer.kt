@@ -35,10 +35,18 @@ object YuvConverter {
      * @param image 来自 ImageAnalysis 的 YUV_420_888 图像
      * @return NV12 格式的字节数组
      */
-    fun imageToNv12(image: Image): ByteArray {
+    /**
+     * 将 Image (YUV_420_888) 转换为 NV12 ByteArray
+     *
+     * @param image 来自 ImageAnalysis 的 YUV_420_888 图像
+     * @param reuse 可复用的输出缓冲区（尺寸匹配时直接写入，避免每帧分配）
+     * @return NV12 格式的字节数组（可能是 reuse 本身）
+     */
+    fun imageToNv12(image: Image, reuse: ByteArray? = null): ByteArray {
         val width = image.width
         val height = image.height
-        val nv12 = ByteArray(width * height * 3 / 2)
+        val size = width * height * 3 / 2
+        val nv12 = if (reuse != null && reuse.size == size) reuse else ByteArray(size)
 
         val yPlane = image.planes[0]
         val uPlane = image.planes[1]
@@ -120,9 +128,15 @@ object YuvConverter {
      * @param dstH  目标高度
      * @return 缩放后的 NV12 数据
      */
+    /**
+     * NV12 居中裁剪 + 缩放（保持目标宽高比，不拉伸变形）
+     *
+     * @param reuse 可复用的输出缓冲区（尺寸匹配时直接写入）
+     */
     fun cropAndScaleNv12(
         src: ByteArray, srcW: Int, srcH: Int,
         dstW: Int, dstH: Int,
+        reuse: ByteArray? = null,
     ): ByteArray {
         if (srcW == dstW && srcH == dstH) return src
 
@@ -150,7 +164,8 @@ object YuvConverter {
 
         Log.d(TAG, "裁剪缩放: ${srcW}×${srcH} → 裁剪 ${cropW}×${cropH}@(${cropX},${cropY}) → ${dstW}×${dstH}")
 
-        val dst = ByteArray(dstW * dstH * 3 / 2)
+        val dstSize = dstW * dstH * 3 / 2
+        val dst = if (reuse != null && reuse.size == dstSize) reuse else ByteArray(dstSize)
 
         // 定点整数缩放系数（16.16 格式，避免浮点运算）
         val xStep = (cropW shl 16) / dstW

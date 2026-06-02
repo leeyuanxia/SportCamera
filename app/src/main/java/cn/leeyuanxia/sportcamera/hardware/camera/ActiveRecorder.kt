@@ -37,6 +37,13 @@ class ActiveRecorder(
         private const val TAG = "ActiveRecorder"
     }
 
+    /**
+     * MediaCodec 编码器实例 — 跨线程访问，需 @Volatile
+     *
+     * prepare()/startEncoder() 在主线程写入，feedFrame() 在 FrameAnalyzer 线程读取，
+     * drainEncoder() 在 IO 线程读取，signalEndOfStream()/stop 可从任意线程调用。
+     */
+    @Volatile
     private var encoder: MediaCodec? = null
 
     @Volatile

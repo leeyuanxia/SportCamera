@@ -17,7 +17,7 @@ import java.util.concurrent.ConcurrentLinkedDeque
  * 唤醒时可 dump 所有缓冲帧用于合成视频。
  *
  * 省电设计：
- * - 待机模式使用较低帧率（15fps）和码率（1.5Mbps）Baseline Profile
+ * - 待机模式使用较低码率（3Mbps）High Profile，帧率与录制一致（30fps）
  * - 环形缓冲仅在内存中，无 Flash IO
  * - 丢弃策略：超过容量时从头部丢弃到关键帧边界
  *
@@ -45,8 +45,8 @@ class RingBufferRecorder(
         // 待机模式默认参数（省电）
         const val STANDBY_WIDTH = 1280
         const val STANDBY_HEIGHT = 720
-        const val STANDBY_FPS = 15
-        const val STANDBY_BITRATE = 1_500_000
+        const val STANDBY_FPS = 30
+        const val STANDBY_BITRATE = 3_000_000
 
         private const val TAG = "RingBufferRecorder"
 
@@ -67,6 +67,20 @@ class RingBufferRecorder(
     @Volatile private var isRunning = false
     @Volatile private var isPrepared = false
 
+    /**
+     * MediaCodec 编码器实例 — 跨线程访问，必须 @Volatile
+     *
+     * 线程分布：
+     * - prepare() / start() 在 FrameAnalyzer 线程写入
+     * - feedFrame() 在 FrameAnalyzer 线程读取（同线程，无可见性问题）
+     * - drainEncoder() 在 IO 线程读取（跨线程！）
+     * - stop() 可能从任意线程写入 null
+     *
+     * 如果缺少 @Volatile，IO 线程在 drainEncoder() 中读取 encoder 时
+     * 可能始终看到 null（FrameAnalyzer 线程的写入不可见），
+     * 导致 drainEncoder 立即 return，环形缓冲永远为空。
+     */
+    @Volatile
     private var encoder: MediaCodec? = null
 
     /** SPS/PPS 配置数据（每个 MP4 文件开头需要） */
@@ -207,7 +221,12 @@ class RingBufferRecorder(
             }
         }
         } catch (e: Exception) {
-            Log.w(TAG, "drainEncoder 退出 (drain了${drainCount}帧): ${e.message}")
+            // 协程取消是正常行为（如 onWakeWordDetected 取消 drainJob），不作为错误
+            if (e is kotlinx.coroutines.CancellationException) {
+                Log.d(TAG, "drainEncoder 被取消 (已 drain ${drainCount} 帧)")
+            } else {
+                Log.w(TAG, "drainEncoder 异常退出 (drain了${drainCount}帧): ${e.message}")
+            }
         }
         Log.d(TAG, "drainEncoder 结束, 总计 drain: $drainCount 帧")
     }
@@ -261,6 +280,9 @@ class RingBufferRecorder(
         buffer.clear()
         currentBytes = 0
     }
+
+    /** 获取当前缓冲帧数（诊断用） */
+    fun bufferSize(): Int = buffer.size
 
     /** 停止编码器 */
     fun stop() {

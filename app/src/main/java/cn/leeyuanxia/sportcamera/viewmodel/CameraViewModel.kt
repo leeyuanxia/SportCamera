@@ -3,6 +3,7 @@ package cn.leeyuanxia.sportcamera.viewmodel
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import cn.leeyuanxia.sportcamera.di.AppContainer
 import cn.leeyuanxia.sportcamera.domain.AppState
 import cn.leeyuanxia.sportcamera.domain.VoiceTriggerRecorder
 import cn.leeyuanxia.sportcamera.domain.model.CameraLens
@@ -26,22 +27,25 @@ import kotlinx.coroutines.launch
  */
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
 
+    private val container = AppContainer.getInstance()
     private val settingsRepo = SettingsRepository(application)
 
-    // 帧管线：连接 CameraX ImageAnalysis 和编码器
-    private val framePipeline = CameraFramePipeline()
-
-    private val kwsManager = KwsManager(application.assets)
-    private val preRecordManager = PreRecordManager()
-    private val storageManager = VideoStorageManager(application)
-    private val cameraController = CameraController(application)
+    // 从 AppContainer 获取共享实例（PowerStateManager、ThermalThrottler 等）
+    private val framePipeline = container.framePipeline
+    private val kwsManager = container.kwsManager
+    private val preRecordManager = container.preRecordManager
+    private val storageManager = container.storageManager
+    private val cameraController = container.cameraController
 
     private val voiceTriggerRecorder = VoiceTriggerRecorder(
+        context = application.applicationContext,
         kwsManager = kwsManager,
         preRecordManager = preRecordManager,
         storageManager = storageManager,
         scope = viewModelScope,
         framePipeline = framePipeline,
+        powerStateManager = container.powerStateManager,
+        thermalThrottler = container.thermalThrottler,
     )
 
     @Volatile
@@ -67,24 +71,19 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val _batteryLevel = kotlinx.coroutines.flow.MutableStateFlow(0)
     val batteryLevel: StateFlow<Int> = _batteryLevel
 
-    // 持续监听 Settings 变化 → 同步到 VoiceTriggerRecorder 和帧管线（含初始加载）
-    // 解决 StateFlow stateIn 初始值与磁盘加载值之间的时序不匹配问题
+    // 持续监听 Settings 变化 → 同步到 VoiceTriggerRecorder 和帧管线
     init {
         viewModelScope.launch {
             preRecordDuration.collect { duration ->
                 voiceTriggerRecorder.setPreRecordDuration(duration)
             }
         }
-        // 分辨率和方向变化时同步更新 VoiceTriggerRecorder 和帧管线
         viewModelScope.launch {
             combine(resolutionProfile, recordOrientation) { profile, orientation ->
                 Pair(profile, orientation)
             }.collect { (profile, orientation) ->
                 voiceTriggerRecorder.setResolutionProfile(profile)
                 voiceTriggerRecorder.setRecordOrientation(orientation)
-                // 使用相机原生 landscape 尺寸作为帧管线目标。
-                // 相机产出 landscape 帧（如 3840×2160），不做旋转直接编码，
-                // MP4 中设置 rotation=90° 让播放器旋转显示为竖屏。
                 framePipeline.setTargetSize(profile.width, profile.height)
             }
         }
@@ -99,7 +98,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             kwsManager.initialize()
             cameraController.initialize()
-            // 设置同步已由 init {} 中的 collect 处理
             monitorBattery()
         }
     }
@@ -113,7 +111,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         orientation: RecordOrientation,
     ) {
         val profile = resolutionProfile.value
-        // 使用相机原生 landscape 尺寸（不做旋转），MP4 中用 rotation 元数据旋转
         framePipeline.setTargetSize(profile.width, profile.height)
         cameraController.bindPreview(
             lifecycleOwner, previewView, currentLens.value, orientation,
@@ -139,11 +136,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    /**
-     * 以下 set 方法只写入 Settings（持久化），
-     * VoiceTriggerRecorder 的同步由 init {} 中的 collect 自动完成。
-     * 这样即使用户保存的设置从磁盘异步加载，也能正确同步到编码器。
-     */
     fun setPreRecordDuration(duration: PreRecordDuration) {
         viewModelScope.launch {
             settingsRepo.setPreRecordDuration(duration)
@@ -162,9 +154,17 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /**
+     * 持续电池监控 — 每 30 秒从 PowerStateManager 更新一次
+     */
     private fun monitorBattery() {
-        val bm = getApplication<Application>().getSystemService(android.os.BatteryManager::class.java)
-        _batteryLevel.value = bm.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        viewModelScope.launch {
+            while (true) {
+                container.powerStateManager.updateBatteryInfo()
+                _batteryLevel.value = container.powerStateManager.batteryLevel.value
+                kotlinx.coroutines.delay(30_000)
+            }
+        }
     }
 
     override fun onCleared() {

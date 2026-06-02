@@ -45,10 +45,13 @@ class AppContainer private constructor(context: Context) {
     val framePipeline = CameraFramePipeline()
 
     val voiceTriggerRecorder = VoiceTriggerRecorder(
+        context = context,
         kwsManager = kwsManager,
         preRecordManager = preRecordManager,
         storageManager = storageManager,
         scope = appScope,
         framePipeline = framePipeline,
+        powerStateManager = powerStateManager,
+        thermalThrottler = thermalThrottler,
     )
 }
