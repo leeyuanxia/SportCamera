@@ -6,10 +6,16 @@ import android.hardware.camera2.CameraManager
 import android.util.Size
 import android.view.Display
 import android.view.Surface
+import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.lifecycle.LifecycleOwner
@@ -31,6 +37,7 @@ import java.util.concurrent.Executors
  * - Preview → PreviewView（屏幕显示）
  * - ImageAnalysis → CameraFramePipeline（帧数据送入编码器）
  */
+@OptIn(ExperimentalCamera2Interop::class)
 class CameraController(private val context: Context) {
 
     private var cameraProvider: ProcessCameraProvider? = null
@@ -94,6 +101,7 @@ class CameraController(private val context: Context) {
      *
      * @param framePipeline 帧管线，接收 Camera 帧并转发给编码器
      */
+    @OptIn(ExperimentalCamera2Interop::class)
     suspend fun bindPreview(
         lifecycleOwner: LifecycleOwner,
         previewView: PreviewView,
@@ -141,7 +149,22 @@ class CameraController(private val context: Context) {
         // Use Case 2: ImageAnalysis → 帧管线（如果提供）
         if (framePipeline != null) {
             val imageAnalysis = ImageAnalysis.Builder()
-                .setTargetResolution(Size(encoderWidth, encoderHeight))
+                .setResolutionSelector(
+                    ResolutionSelector.Builder()
+                        .setAspectRatioStrategy(
+                            AspectRatioStrategy(
+                                AspectRatio.RATIO_16_9,
+                                AspectRatioStrategy.FALLBACK_RULE_AUTO
+                            )
+                        )
+                        .setResolutionStrategy(
+                            ResolutionStrategy(
+                                Size(encoderWidth, encoderHeight),
+                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                            )
+                        )
+                        .build()
+                )
                 .setTargetRotation(targetRotation)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)

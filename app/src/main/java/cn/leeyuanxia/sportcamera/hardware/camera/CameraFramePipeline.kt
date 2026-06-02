@@ -98,12 +98,14 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
             var frameW = image.width
             var frameH = image.height
 
-            // 当相机输出分辨率与编码器目标分辨率不匹配时，缩放 NV12 数据
-            // 例如：相机输出 2976×2976，编码器配置 1920×1080
+            // 当相机输出分辨率与编码器目标分辨率不匹配时，
+            // 居中裁剪 + 缩放 NV12 数据（保持宽高比，不拉伸变形）
+            // 例如：相机输出 2976×2976 (1:1)，目标 1920×1080 (16:9)
+            //   → 先居中裁剪为 2976×1674，再缩放到 1920×1080
             if (targetWidth > 0 && targetHeight > 0
                 && (frameW != targetWidth || frameH != targetHeight)
             ) {
-                nv12 = YuvConverter.scaleNv12(nv12, frameW, frameH, targetWidth, targetHeight)
+                nv12 = YuvConverter.cropAndScaleNv12(nv12, frameW, frameH, targetWidth, targetHeight)
                 frameW = targetWidth
                 frameH = targetHeight
             }
