@@ -38,11 +38,14 @@ import cn.leeyuanxia.sportcamera.ui.theme.ChipUnselected
  * 底部控制栏
  *
  * 包含：
- * - 预录时长：预设 Chips + 自定义 Slider（1~120s）
+ * - 预录时长：预设 Chips + 自定义 Slider
  * - 录制方向：横屏/竖屏 Chips
  * - 分辨率档位选择
  * - 镜头切换按钮
  * - 待机启停按钮
+ * - 预览窥视按钮（待机时显示 30s 预览）
+ * - UI 显隐切换按钮
+ * - 电池优化白名单按钮
  */
 @Composable
 fun ControlBar(
@@ -52,155 +55,222 @@ fun ControlBar(
     currentLens: CameraLens,
     selectedProfile: ResolutionProfile,
     selectedOrientation: RecordOrientation,
+    previewVisible: Boolean,
+    onStartStandby: () -> Unit,
+    onStopStandby: () -> Unit,
+    onPeekPreview: () -> Unit,
+    onToggleUi: () -> Unit,
     onDurationChanged: (PreRecordDuration) -> Unit,
     onLensSwitch: (CameraLens) -> Unit,
     onResolutionChanged: (ResolutionProfile) -> Unit,
     onOrientationChanged: (RecordOrientation) -> Unit,
-    onStartStandby: () -> Unit,
-    onStopStandby: () -> Unit,
+    onRequestBatteryOptimization: () -> Unit,
+    needsBatteryOptimization: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    val isStandby = appState is AppState.Standby
+    val isRecording = appState is AppState.Recording
+    val isIdle = appState is AppState.Idle
+
     Column(
         modifier = modifier
             .background(Color.Black.copy(alpha = 0.6f))
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
-        // 上排：预录时长 Chips + Slider
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // 预设快捷 Chips
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                PreRecordDuration.PRESETS.forEach { preset ->
-                    DurationChip(
-                        label = preset.label,
-                        isSelected = preset == selectedDuration,
-                        onClick = { onDurationChanged(preset) },
-                    )
-                }
-            }
-
-            Spacer(Modifier.width(8.dp))
-
-            // 自定义 Slider（1~120s）
-            var sliderValue by remember(selectedDuration) {
-                mutableFloatStateOf(selectedDuration.seconds.toFloat())
-            }
-
-            Column(modifier = Modifier.weight(1f)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Text(
-                        text = "预录时长",
-                        color = Color.White,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Text(
-                        text = "${sliderValue.toInt()}s",
-                        color = ChipSelected,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                }
-                Slider(
-                    value = sliderValue,
-                    onValueChange = { v ->
-                        sliderValue = v
-                        onDurationChanged(PreRecordDuration(v.toInt()))
-                    },
-                    valueRange = PreRecordDuration.MIN.toFloat()..PreRecordDuration.MAX.toFloat(),
-                    steps = (PreRecordDuration.MAX - PreRecordDuration.MIN) - 1,
-                    colors = SliderDefaults.colors(
-                        thumbColor = ChipSelected,
-                        activeTrackColor = ChipSelected,
-                        inactiveTrackColor = ChipUnselected,
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        }
-
-        // 中排：录制方向 Chips
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = "方向",
-                color = Color.White,
-                style = MaterialTheme.typography.bodySmall,
-            )
-            Spacer(Modifier.width(4.dp))
-            RecordOrientation.entries.forEach { orientation ->
-                OrientationChip(
-                    label = orientation.label,
-                    isSelected = orientation == selectedOrientation,
-                    onClick = { onOrientationChanged(orientation) },
-                )
-            }
-        }
-
-        // 下排：分辨率 + 镜头 + 待机按钮
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // 分辨率选择（权重分配，防止把右侧按钮挤出屏幕）
+        // ===== 待机模式：精简控制 =====
+        if (isStandby) {
+            // 上排：窥视预览 + UI 隐藏 + 电池优化 + 停止
             Row(
-                modifier = Modifier.weight(1f, fill = false),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                ResolutionProfile.entries.forEach { profile ->
-                    ResolutionChip(
-                        label = profile.shortLabel,
-                        isSelected = profile == selectedProfile,
-                        onClick = { onResolutionChanged(profile) },
+                // 窥视预览按钮
+                ActionChip(
+                    label = if (previewVisible) "👁 预览中" else "👁 预览",
+                    onClick = onPeekPreview,
+                )
+
+                // UI 隐藏按钮（省电）
+                ActionChip(
+                    label = "🌑 隐藏界面",
+                    onClick = onToggleUi,
+                )
+
+                // 电池优化白名单（未优化时显示）
+                if (needsBatteryOptimization) {
+                    ActionChip(
+                        label = "🔋 省电",
+                        onClick = onRequestBatteryOptimization,
+                    )
+                }
+
+                Spacer(Modifier.weight(1f))
+
+                // 停止按钮
+                ActionChip(
+                    label = "⏹ 停止",
+                    onClick = onStopStandby,
+                    bgColor = Color.Red.copy(alpha = 0.7f),
+                )
+            }
+        } else {
+            // ===== 空闲 / 录制模式：完整控制 =====
+
+            // 上排：预录时长 Chips + Slider
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    PreRecordDuration.PRESETS.forEach { preset ->
+                        DurationChip(
+                            label = preset.label,
+                            isSelected = preset == selectedDuration,
+                            onClick = { onDurationChanged(preset) },
+                        )
+                    }
+                }
+
+                Spacer(Modifier.width(8.dp))
+
+                var sliderValue by remember(selectedDuration) {
+                    mutableFloatStateOf(selectedDuration.seconds.toFloat())
+                }
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            text = "预录时长",
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Text(
+                            text = "${sliderValue.toInt()}s",
+                            color = ChipSelected,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    Slider(
+                        value = sliderValue,
+                        onValueChange = { v ->
+                            sliderValue = v
+                            onDurationChanged(PreRecordDuration(v.toInt()))
+                        },
+                        valueRange = PreRecordDuration.MIN.toFloat()..PreRecordDuration.MAX.toFloat(),
+                        steps = (PreRecordDuration.MAX - PreRecordDuration.MIN) - 1,
+                        colors = SliderDefaults.colors(
+                            thumbColor = ChipSelected,
+                            activeTrackColor = ChipSelected,
+                            inactiveTrackColor = ChipUnselected,
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
                     )
                 }
             }
 
-            Spacer(Modifier.width(8.dp))
-
-            // 镜头切换（仅在有两个以上镜头时显示）
-            if (availableLenses.size > 1) {
-                val nextLens = when (currentLens) {
-                    CameraLens.WIDE -> CameraLens.ULTRA_WIDE
-                    CameraLens.ULTRA_WIDE -> CameraLens.WIDE
-                }
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color.White.copy(alpha = 0.2f))
-                        .clickable { onLensSwitch(nextLens) }
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                ) {
-                    Text("🔄 ${nextLens.label}", color = Color.White, style = MaterialTheme.typography.bodySmall)
+            // 中排：录制方向 Chips
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "方向",
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.width(4.dp))
+                RecordOrientation.entries.forEach { orientation ->
+                    OrientationChip(
+                        label = orientation.label,
+                        isSelected = orientation == selectedOrientation,
+                        onClick = { onOrientationChanged(orientation) },
+                    )
                 }
             }
 
-            // 待机启停按钮
-            val isStandby = appState is AppState.Standby
-            val isRecording = appState is AppState.Recording
-            val buttonText = if (isStandby || isRecording) "⏹ 停止" else "▶ 待机"
-            val buttonColor = if (isStandby || isRecording) Color.Red.copy(alpha = 0.7f) else Color.White.copy(alpha = 0.3f)
-
-            Box(
-                modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                    .background(buttonColor)
-                    .clickable {
-                        if (isStandby || isRecording) onStopStandby() else onStartStandby()
-                    }
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
+            // 下排：分辨率 + 镜头 + 待机/停止
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(buttonText, color = Color.White, style = MaterialTheme.typography.bodyMedium)
+                Row(
+                    modifier = Modifier.weight(1f, fill = false),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    ResolutionProfile.entries.forEach { profile ->
+                        ResolutionChip(
+                            label = profile.shortLabel,
+                            isSelected = profile == selectedProfile,
+                            onClick = { onResolutionChanged(profile) },
+                        )
+                    }
+                }
+
+                Spacer(Modifier.width(8.dp))
+
+                if (availableLenses.size > 1) {
+                    val nextLens = when (currentLens) {
+                        CameraLens.WIDE -> CameraLens.ULTRA_WIDE
+                        CameraLens.ULTRA_WIDE -> CameraLens.WIDE
+                    }
+                    ActionChip(
+                        label = "🔄 ${nextLens.label}",
+                        onClick = { onLensSwitch(nextLens) },
+                    )
+                }
+
+                // 电池优化白名单（未优化时显示）
+                if (needsBatteryOptimization && isIdle) {
+                    Spacer(Modifier.width(4.dp))
+                    ActionChip(
+                        label = "🔋 省电",
+                        onClick = onRequestBatteryOptimization,
+                    )
+                }
+
+                Spacer(Modifier.width(4.dp))
+
+                // 待机启停按钮
+                val buttonText = if (isStandby || isRecording) "⏹ 停止" else "▶ 待机"
+                val buttonColor = if (isStandby || isRecording) Color.Red.copy(alpha = 0.7f) else Color.White.copy(alpha = 0.3f)
+
+                ActionChip(
+                    label = buttonText,
+                    onClick = {
+                        if (isStandby || isRecording) onStopStandby() else onStartStandby()
+                    },
+                    bgColor = buttonColor,
+                )
             }
         }
+    }
+}
+
+/**
+ * 通用操作按钮
+ */
+@Composable
+fun ActionChip(
+    label: String,
+    onClick: () -> Unit,
+    bgColor: Color = Color.White.copy(alpha = 0.2f),
+) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(bgColor)
+            .clickable { onClick() }
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, color = Color.White, style = MaterialTheme.typography.bodySmall)
     }
 }
 

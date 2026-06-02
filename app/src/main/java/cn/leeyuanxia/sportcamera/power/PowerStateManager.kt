@@ -1,10 +1,9 @@
 package cn.leeyuanxia.sportcamera.power
 
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
 import android.os.BatteryManager
 import android.os.PowerManager
+import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -13,11 +12,15 @@ import kotlinx.coroutines.flow.asStateFlow
  * 省电管理器 — WakeLock 和电池状态监控
  *
  * 策略：
- * - 待机模式：PARTIAL_WAKE_LOCK（保持 CPU，允许屏幕关闭）
- * - 录制模式：PARTIAL_WAKE_LOCK + FLAG_KEEP_SCREEN_ON（屏幕保持亮）
- * - 30分钟安全阀：防止 WakeLock 无限持有
+ * - 待机模式：PARTIAL_WAKE_LOCK（保持 CPU 运行） + 屏幕常亮最低亮度
+ * - 录制模式：屏幕常亮正常亮度
+ * - WakeLock 无超时限制，由 stop() 主动释放
  */
 class PowerStateManager(private val context: Context) {
+
+    companion object {
+        private const val TAG = "PowerStateManager"
+    }
 
     private val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
     private var wakeLock: PowerManager.WakeLock? = null
@@ -29,10 +32,17 @@ class PowerStateManager(private val context: Context) {
     val isCharging: StateFlow<Boolean> = _isCharging.asStateFlow()
 
     /**
-     * 获取待机 WakeLock
+     * 是否已获得电池优化白名单
+     */
+    fun isIgnoringBatteryOptimizations(): Boolean {
+        return powerManager.isIgnoringBatteryOptimizations(context.packageName)
+    }
+
+    /**
+     * 获取待机 WakeLock（无超时）
      *
-     * PARTIAL_WAKE_LOCK：CPU 保持运行，屏幕和键盘可以关闭。
-     * 这是最省电的 WakeLock 类型，适合长时间待机场景。
+     * PARTIAL_WAKE_LOCK：CPU 保持运行。
+     * 不设超时 — 运动相机场景需要长时间待机，由 stop() 主动释放。
      */
     fun acquireStandbyWakeLock() {
         releaseWakeLock()
@@ -40,8 +50,9 @@ class PowerStateManager(private val context: Context) {
             PowerManager.PARTIAL_WAKE_LOCK,
             "SportCamera:StandbyWakeLock"
         ).apply {
-            acquire(30 * 60 * 1000L) // 30分钟安全阀
+            acquire() // 无超时，由 releaseWakeLock() 释放
         }
+        Log.d(TAG, "WakeLock 已获取（无超时）")
     }
 
     /**
@@ -49,7 +60,10 @@ class PowerStateManager(private val context: Context) {
      */
     fun releaseWakeLock() {
         wakeLock?.let {
-            if (it.isHeld) it.release()
+            if (it.isHeld) {
+                it.release()
+                Log.d(TAG, "WakeLock 已释放")
+            }
         }
         wakeLock = null
     }

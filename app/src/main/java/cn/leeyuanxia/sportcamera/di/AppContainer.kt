@@ -6,6 +6,7 @@ import cn.leeyuanxia.sportcamera.domain.VoiceTriggerRecorder
 import cn.leeyuanxia.sportcamera.hardware.audio.KwsManager
 import cn.leeyuanxia.sportcamera.hardware.camera.CameraController
 import cn.leeyuanxia.sportcamera.hardware.camera.CameraFramePipeline
+import cn.leeyuanxia.sportcamera.hardware.camera.CameraLifecycleOwner
 import cn.leeyuanxia.sportcamera.hardware.storage.VideoStorageManager
 import cn.leeyuanxia.sportcamera.power.PowerStateManager
 import cn.leeyuanxia.sportcamera.power.ThermalThrottler
@@ -39,6 +40,7 @@ class AppContainer private constructor(context: Context) {
     val kwsManager = KwsManager(context.assets)
     val preRecordManager = PreRecordManager()
     val cameraController = CameraController(context)
+    val cameraLifecycleOwner = CameraLifecycleOwner()
     val storageManager = VideoStorageManager(context)
     val powerStateManager = PowerStateManager(context)
     val thermalThrottler = ThermalThrottler(context)

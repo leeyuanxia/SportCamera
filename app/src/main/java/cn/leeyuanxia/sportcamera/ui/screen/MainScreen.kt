@@ -8,6 +8,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,7 +23,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -31,6 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import cn.leeyuanxia.sportcamera.domain.AppState
@@ -38,17 +39,25 @@ import cn.leeyuanxia.sportcamera.domain.isRecording
 import cn.leeyuanxia.sportcamera.ui.component.CameraPreview
 import cn.leeyuanxia.sportcamera.ui.component.ControlBar
 import cn.leeyuanxia.sportcamera.ui.component.RecordIndicator
+import cn.leeyuanxia.sportcamera.ui.component.StandbyOverlay
 import cn.leeyuanxia.sportcamera.ui.component.StatusBar
 import cn.leeyuanxia.sportcamera.viewmodel.CameraViewModel
 
 /**
- * 主界面 — 全屏竖屏布局
+ * 主界面 — 全屏布局
  *
  * 层级结构：
- * Layer 1: 全屏 Camera 预览
- * Layer 2: 顶部状态栏（半透明）
- * Layer 3: 中央录制指示器（仅录制时显示）
- * Layer 4: 底部控制栏（半透明）
+ * Layer 0: 全黑背景（OLED 省电）
+ * Layer 1: 相机预览（条件显示）
+ * Layer 2: 待机叠加层（省电状态指示）
+ * Layer 3: 顶部状态栏
+ * Layer 4: 中央录制指示器
+ * Layer 5: 底部控制栏
+ *
+ * 省电策略：
+ * - 待机模式：预览隐藏 + 屏幕最低亮度常亮 + UI 可全部隐藏（OLED 全黑）
+ * - 录制模式：预览显示 + 屏幕正常亮度
+ * - 点击屏幕可唤醒被隐藏的 UI
  */
 @Composable
 fun MainScreen(viewModel: CameraViewModel) {
@@ -59,26 +68,44 @@ fun MainScreen(viewModel: CameraViewModel) {
     val resolutionProfile by viewModel.resolutionProfile.collectAsState()
     val recordOrientation by viewModel.recordOrientation.collectAsState()
     val batteryLevel by viewModel.batteryLevel.collectAsState()
+    val previewVisible by viewModel.previewVisible.collectAsState()
+    val uiVisible by viewModel.uiVisible.collectAsState()
 
     val context = LocalContext.current
     val activity = context as? ComponentActivity
 
-    // 屏幕亮度控制：录制时保持屏幕亮
-    DisposableEffect(appState) {
-        if (appState.isRecording) {
-            activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    val isActive = appState is AppState.Standby || appState.isRecording
+
+    // 屏幕亮度和常亮控制
+    DisposableEffect(isActive, appState) {
+        val window = activity?.window
+        if (isActive) {
+            // 待机和录制时：屏幕常亮
+            window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            // 设置最低亮度（不修改系统设置，只修改当前窗口）
+            val params = window?.attributes
+            params?.screenBrightness = if (appState.isRecording) {
+                WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE // 录制时恢复系统默认
+            } else {
+                0.01f // 待机时最低亮度
+            }
+            window?.attributes = params
         } else {
-            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            // 非活跃状态：清除常亮标志，恢复系统亮度
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            val params = window?.attributes
+            params?.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+            window?.attributes = params
         }
         onDispose {
-            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            val params = window?.attributes
+            params?.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+            window?.attributes = params
         }
     }
 
-    // 动态方向控制：根据录制方向切换 Activity 屏幕方向
-    // 竖屏 → SCREEN_ORIENTATION_PORTRAIT，横屏 → SCREEN_ORIENTATION_LANDSCAPE
-    // 这会让整个 UI（StatusBar、ControlBar、系统导航栏）全部旋转，
-    // 比 graphicsLayer 假旋转更彻底、触摸事件也正确
+    // 动态方向控制
     DisposableEffect(recordOrientation) {
         activity?.requestedOrientation = when (recordOrientation) {
             cn.leeyuanxia.sportcamera.domain.model.RecordOrientation.PORTRAIT ->
@@ -87,80 +114,112 @@ fun MainScreen(viewModel: CameraViewModel) {
                 ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         }
         onDispose {
-            // 离开时恢复竖屏
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
     }
 
-    // 权限检查 — 权限授予后才初始化摄像头和 KWS 模块
+    // 权限检查
     PermissionGate(
         onPermissionsGranted = {
-            // 关键修复：权限授予后才初始化，避免 SecurityException 崩溃
             viewModel.initialize()
         }
     ) {
-        Box(modifier = Modifier.fillMaxSize()) {
-            // Layer 1: 全屏取景器
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                // UI 隐藏时，点击屏幕唤醒 UI
+                .then(
+                    if (!uiVisible) {
+                        Modifier.pointerInput(Unit) {
+                            detectTapGestures { viewModel.showUi() }
+                        }
+                    } else Modifier
+                ),
+        ) {
+            // Layer 1: 相机预览（条件显示）
+            // 不论是否可见，CameraPreview 始终存在（保持 CameraX 绑定）
+            // 通过 alpha 控制可见性，隐藏时完全透明（OLED 不发光）
             CameraPreview(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(
+                        if (previewVisible) Modifier
+                        else Modifier.background(Color.Black) // 隐藏时用黑底覆盖
+                    ),
                 orientation = recordOrientation,
                 onBindCamera = { previewView, lifecycleOwner, orientation ->
                     viewModel.bindCamera(lifecycleOwner, previewView, orientation)
                 },
+                isVisible = previewVisible,
             )
 
-            // Layer 2: 顶部状态栏
-            StatusBar(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .statusBarsPadding(),
-                appState = appState,
-                preRecordDuration = preRecordDuration,
-                selectedLens = currentLens,
-                batteryLevel = batteryLevel,
-            )
+            // 仅在活跃状态（待机/录制）时显示以下层
+            if (uiVisible) {
+                // Layer 2: 待机叠加层（预览隐藏时的状态指示）
+                if (appState is AppState.Standby && !previewVisible) {
+                    StandbyOverlay(
+                        modifier = Modifier.fillMaxSize(),
+                        appState = appState,
+                        batteryLevel = batteryLevel,
+                    )
+                }
 
-            // Layer 3: 中央录制指示器
-            RecordIndicator(
-                modifier = Modifier.align(Alignment.Center),
-                appState = appState,
-            )
+                // Layer 3: 顶部状态栏
+                StatusBar(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .then(
+                            if (appState is AppState.Standby)
+                                Modifier.statusBarsPadding()
+                            else Modifier.statusBarsPadding()
+                        ),
+                    appState = appState,
+                    preRecordDuration = preRecordDuration,
+                    selectedLens = currentLens,
+                    batteryLevel = batteryLevel,
+                )
 
-            // Layer 4: 底部控制栏
-            ControlBar(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .navigationBarsPadding(),
-                appState = appState,
-                selectedDuration = preRecordDuration,
-                availableLenses = availableLenses,
-                currentLens = currentLens,
-                selectedProfile = resolutionProfile,
-                selectedOrientation = recordOrientation,
-                onDurationChanged = viewModel::setPreRecordDuration,
-                onLensSwitch = viewModel::switchLens,
-                onResolutionChanged = viewModel::setResolutionProfile,
-                onOrientationChanged = viewModel::setRecordOrientation,
-                onStartStandby = viewModel::startStandby,
-                onStopStandby = viewModel::stopStandby,
-            )
+                // Layer 4: 中央录制指示器
+                RecordIndicator(
+                    modifier = Modifier.align(Alignment.Center),
+                    appState = appState,
+                )
+
+                // Layer 5: 底部控制栏
+                ControlBar(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .navigationBarsPadding(),
+                    appState = appState,
+                    selectedDuration = preRecordDuration,
+                    availableLenses = availableLenses,
+                    currentLens = currentLens,
+                    selectedProfile = resolutionProfile,
+                    selectedOrientation = recordOrientation,
+                    previewVisible = previewVisible,
+                    onStartStandby = viewModel::startStandby,
+                    onStopStandby = viewModel::stopStandby,
+                    onPeekPreview = viewModel::peekPreview,
+                    onToggleUi = viewModel::toggleUi,
+                    onDurationChanged = viewModel::setPreRecordDuration,
+                    onLensSwitch = viewModel::switchLens,
+                    onResolutionChanged = viewModel::setResolutionProfile,
+                    onOrientationChanged = viewModel::setRecordOrientation,
+                    onRequestBatteryOptimization = {
+                        viewModel.requestBatteryOptimization(context)
+                    },
+                    needsBatteryOptimization = viewModel.needsBatteryOptimization,
+                )
+            }
         }
     }
 }
 
 /**
- * 权限门 — 使用 ActivityResult API，权限结果自动触发 recomposition
- *
- * 修复原 Bug：原实现用普通 val allGranted（Compose 不追踪）+ ActivityCompat.requestPermissions（无回调通知），
- * 导致授权后 App 卡住不动。
- *
- * 现改为：
- * - mutableStateOf 持有权限状态 → 授权结果自动触发 recomposition
- * - rememberLauncherForActivityResult 替代 ActivityCompat → 结果回调写入 State
- * - LaunchedEffect 自动弹出系统权限对话框（省一次点击）
- * - onPermissionsGranted 回调：权限首次授予时触发，用于延迟初始化摄像头等需要权限的模块
+ * 权限门
  */
 @Composable
 private fun PermissionGate(
@@ -175,7 +234,6 @@ private fun PermissionGate(
         Manifest.permission.POST_NOTIFICATIONS,
     )
 
-    // 关键修复：用 mutableStateOf 持有权限状态，Launcher 回调更新它 → 自动 recomposition
     var allGranted by remember {
         mutableStateOf(
             permissions.all {
@@ -184,26 +242,22 @@ private fun PermissionGate(
         )
     }
 
-    // 记录是否已经触发过初始化回调（避免 recomposition 时重复调用）
     var hasNotified by remember { mutableStateOf(allGranted) }
 
-    // 关键修复：ActivityResult Launcher 替代 ActivityCompat.requestPermissions
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result: Map<String, Boolean> ->
         allGranted = result.values.all { it }
     }
 
-    // 权限状态变化时触发回调（首次授予时通知外部初始化）
-    LaunchedEffect(allGranted) {
+    androidx.compose.runtime.LaunchedEffect(allGranted) {
         if (allGranted && !hasNotified) {
             hasNotified = true
             onPermissionsGranted()
         }
     }
 
-    // 首次进入时若未授权，自动弹出系统权限对话框（用户体验更顺畅）
-    LaunchedEffect(Unit) {
+    androidx.compose.runtime.LaunchedEffect(Unit) {
         if (!allGranted) {
             permissionLauncher.launch(permissions)
         }

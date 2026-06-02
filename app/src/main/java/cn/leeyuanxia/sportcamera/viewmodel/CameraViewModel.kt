@@ -1,6 +1,12 @@
 package cn.leeyuanxia.sportcamera.viewmodel
 
 import android.app.Application
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import cn.leeyuanxia.sportcamera.di.AppContainer
@@ -12,12 +18,17 @@ import cn.leeyuanxia.sportcamera.domain.model.RecordOrientation
 import cn.leeyuanxia.sportcamera.domain.model.ResolutionProfile
 import cn.leeyuanxia.sportcamera.hardware.camera.CameraController
 import cn.leeyuanxia.sportcamera.hardware.camera.CameraFramePipeline
+import cn.leeyuanxia.sportcamera.hardware.camera.CameraLifecycleOwner
 import cn.leeyuanxia.sportcamera.hardware.audio.KwsManager
 import cn.leeyuanxia.sportcamera.hardware.storage.VideoStorageManager
 import cn.leeyuanxia.sportcamera.domain.PreRecordManager
 import cn.leeyuanxia.sportcamera.data.SettingsRepository
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -27,11 +38,18 @@ import kotlinx.coroutines.launch
  */
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
 
+    companion object {
+        private const val TAG = "CameraViewModel"
+        /** 预览窥视持续时间 */
+        private const val PEEK_DURATION_MS = 30_000L
+    }
+
     private val container = AppContainer.getInstance()
     private val settingsRepo = SettingsRepository(application)
 
-    // 从 AppContainer 获取共享实例（PowerStateManager、ThermalThrottler 等）
+    // 从 AppContainer 获取共享实例
     private val framePipeline = container.framePipeline
+    private val cameraLifecycleOwner = container.cameraLifecycleOwner
     private val kwsManager = container.kwsManager
     private val preRecordManager = container.preRecordManager
     private val storageManager = container.storageManager
@@ -68,8 +86,22 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     val recordOrientation: StateFlow<RecordOrientation> =
         settingsRepo.recordOrientation.stateIn(viewModelScope, SharingStarted.Eagerly, RecordOrientation.DEFAULT)
 
-    private val _batteryLevel = kotlinx.coroutines.flow.MutableStateFlow(0)
-    val batteryLevel: StateFlow<Int> = _batteryLevel
+    val batteryLevel: StateFlow<Int> = container.powerStateManager.batteryLevel
+
+    /** 预览画面是否可见 — 待机时隐藏，录制时显示，支持 30s 窥视 */
+    private val _previewVisible = MutableStateFlow(true)
+    val previewVisible: StateFlow<Boolean> = _previewVisible.asStateFlow()
+
+    /** UI 叠加层是否可见 — 待机时可隐藏以最大省电（OLED 全黑） */
+    private val _uiVisible = MutableStateFlow(true)
+    val uiVisible: StateFlow<Boolean> = _uiVisible.asStateFlow()
+
+    /** 是否需要请求电池优化白名单 */
+    val needsBatteryOptimization: Boolean
+        get() = !container.powerStateManager.isIgnoringBatteryOptimizations()
+
+    /** 窥视预览的定时任务 */
+    private var peekJob: Job? = null
 
     // 持续监听 Settings 变化 → 同步到 VoiceTriggerRecorder 和帧管线
     init {
@@ -87,6 +119,42 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 framePipeline.setTargetSize(profile.width, profile.height)
             }
         }
+        // 根据 AppState 自动切换预览可见性
+        viewModelScope.launch {
+            appState.collect { state ->
+                when (state) {
+                    is AppState.Recording -> {
+                        // 录制时显示预览
+                        peekJob?.cancel()
+                        _previewVisible.value = true
+                    }
+                    is AppState.Idle -> {
+                        // 空闲时显示预览（用户配置阶段）
+                        peekJob?.cancel()
+                        _previewVisible.value = true
+                    }
+                    is AppState.Standby -> {
+                        // 待机时隐藏预览（省电），除非正在窥视
+                        if (peekJob?.isActive != true) {
+                            _previewVisible.value = false
+                        }
+                    }
+                    else -> {
+                        // Saving, Error → 隐藏预览
+                        if (peekJob?.isActive != true) {
+                            _previewVisible.value = false
+                        }
+                    }
+                }
+            }
+        }
+        // 电池监控
+        viewModelScope.launch {
+            while (true) {
+                container.powerStateManager.updateBatteryInfo()
+                delay(30_000)
+            }
+        }
     }
 
     // ---- UI 调用的方法 ----
@@ -98,7 +166,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             kwsManager.initialize()
             cameraController.initialize()
-            monitorBattery()
         }
     }
 
@@ -112,8 +179,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     ) {
         val profile = resolutionProfile.value
         framePipeline.setTargetSize(profile.width, profile.height)
+        // 用 CameraLifecycleOwner 包装 Activity 生命周期
+        // 待机模式下拦截 Activity.onStop()，锁屏后相机持续采集
+        cameraLifecycleOwner.setWrappedOwner(lifecycleOwner)
         cameraController.bindPreview(
-            lifecycleOwner, previewView, currentLens.value, orientation,
+            cameraLifecycleOwner, previewView, currentLens.value, orientation,
             framePipeline = framePipeline,
             encoderWidth = profile.width,
             encoderHeight = profile.height,
@@ -121,6 +191,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun startStandby() {
+        // 先锁定相机生命周期为 STARTED，再进入待机
+        cameraLifecycleOwner.enterStandby()
         viewModelScope.launch {
             voiceTriggerRecorder.enterStandby()
         }
@@ -128,6 +200,71 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun stopStandby() {
         voiceTriggerRecorder.stop()
+        // 退出待机后恢复 Activity 生命周期镜像
+        cameraLifecycleOwner.exitStandby()
+        // 恢复预览和 UI
+        _previewVisible.value = true
+        _uiVisible.value = true
+    }
+
+    /**
+     * 切换预览窥视 — 再次点击立即关闭
+     *
+     * 仅在待机模式下有效：
+     * - 预览隐藏时 → 显示预览，30s 后自动关闭
+     * - 预览显示时 → 立即关闭预览，取消定时
+     */
+    fun peekPreview() {
+        if (appState.value !is AppState.Standby) return
+        if (_previewVisible.value) {
+            // 预览正在显示 → 立即关闭
+            peekJob?.cancel()
+            _previewVisible.value = false
+            Log.d(TAG, "窥视预览手动关闭")
+        } else {
+            // 预览隐藏 → 显示，30s 后自动关闭
+            _previewVisible.value = true
+            peekJob?.cancel()
+            peekJob = viewModelScope.launch {
+                delay(PEEK_DURATION_MS)
+                _previewVisible.value = false
+                Log.d(TAG, "窥视预览 ${PEEK_DURATION_MS / 1000}s 到期，自动关闭")
+            }
+            Log.d(TAG, "窥视预览开始，${PEEK_DURATION_MS / 1000}s 后自动关闭")
+        }
+    }
+
+    /**
+     * 切换 UI 叠加层可见性
+     *
+     * 隐藏所有 UI 控件 → OLED 全黑 → 最省电
+     */
+    fun toggleUi() {
+        _uiVisible.value = !_uiVisible.value
+    }
+
+    /**
+     * 显示 UI（点击屏幕时调用）
+     */
+    fun showUi() {
+        _uiVisible.value = true
+    }
+
+    /**
+     * 请求电池优化白名单
+     *
+     * 弹出系统对话框，用户同意后 App 不受电池优化限制。
+     */
+    fun requestBatteryOptimization(context: Context) {
+        try {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:${context.packageName}")
+            }
+            context.startActivity(intent)
+            Log.d(TAG, "已请求电池优化白名单")
+        } catch (e: Exception) {
+            Log.w(TAG, "请求电池优化白名单失败: ${e.message}")
+        }
     }
 
     fun switchLens(lens: CameraLens) {
@@ -154,22 +291,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    /**
-     * 持续电池监控 — 每 30 秒从 PowerStateManager 更新一次
-     */
-    private fun monitorBattery() {
-        viewModelScope.launch {
-            while (true) {
-                container.powerStateManager.updateBatteryInfo()
-                _batteryLevel.value = container.powerStateManager.batteryLevel.value
-                kotlinx.coroutines.delay(30_000)
-            }
-        }
-    }
-
     override fun onCleared() {
         super.onCleared()
         voiceTriggerRecorder.release()
         cameraController.release()
+        cameraLifecycleOwner.destroy()
     }
 }
