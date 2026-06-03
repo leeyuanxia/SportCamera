@@ -54,14 +54,35 @@ PARTIAL_WAKE_LOCK（部分唤醒锁）
 
 ## 二、帧处理优化
 
-### 2.1 帧率节流（省 50% CPU）
+### 2.1 双路径架构
 
 ```
-相机输出: ~30fps
+分辨率判断:
+  width >= 3840 && fps > 30 (4K@60fps)?
+     │
+     ├── YES → Camera2 Surface 模式（零拷贝）
+     │          相机 → 编码器 InputSurface（硬件零拷贝）
+     │          CameraFramePipeline.setSurfaceMode(true) → analyze() 跳过
+     │          帧率控制: Camera2 AE FPS Range
+     │
+     └── NO  → CameraX ImageAnalysis 模式
+               │
+               ├── width >= 3840 (4K@30fps): feedFrameDirect 零拷贝路径
+               │   YUV 直接写入编码器 ByteBuffer，省去 ~12MB ByteArray 中转
+               │
+               └── 其他分辨率: 普通路径
+                   YUV → NV12 ByteArray → 编码器 ByteBuffer
+                   帧率控制: skipPattern 跳帧
+```
+
+### 2.2 帧率节流（省 50% CPU）
+
+```
+相机输出: ~30fps / ~60fps
                 │
      ┌──────────┴──────────┐
      │                     │
- 待机模式 (30fps)       录制模式 (30fps)
+ 待机模式 (30fps)       录制模式 (全帧率)
  skipPattern = 1       skipPattern = 1
  全部处理              全部处理
      │                     │
@@ -69,11 +90,14 @@ PARTIAL_WAKE_LOCK（部分唤醒锁）
      │                     │
      ▼                     ▼
  与录制帧率一致        全帧率录制
+
+ Surface 模式 (4K@60fps):
+ 不走帧管线，通过 Camera2 AE FPS Range 控制帧率
 ```
 
 **跳帧时机很关键**：在 `analyze()` 最开始（YUV 转换之前）跳帧，避免浪费任何 CPU 在即将被丢弃的帧上。
 
-### 2.2 缓冲区复用（消除 GC 停顿）
+### 2.3 缓冲区复用（消除 GC 停顿）
 
 优化前每帧的内存分配：
 
@@ -92,6 +116,10 @@ scaledNv12Buffer:    复用，仅目标尺寸变化时重新分配
 uBytesCache/vBytesCache: 复用 UV 中间缓冲区
 KwsManager samplesBuffer: 复用 Float 数组
                           总计: 稳定状态 0 分配/帧
+
+4K 零拷贝路径 (feedFrameDirect):
+  不经过 ByteArray 中转，YUV 直接写入编码器输入缓冲区
+  省去 ~12MB 的 fullNv12Buffer 分配
 ```
 
 ### 2.3 UV 平面优化
@@ -154,14 +182,20 @@ ThermalThrottler (init 中注册监听器)
 | KWS 间隔 | 100ms | 150ms | 300ms |
 | CPU 估算 | 基准 | ~60% | ~30% |
 
-### 3.3 编码器重建
+### 3.3 编码器重建与 Surface 模式降频
 
-热等级变化时，`PreRecordManager` 会：
+**ByteBuffer 模式**下，热等级变化时 `PreRecordManager` 会：
 1. 停止当前 `RingBufferRecorder`
 2. 释放资源
 3. 用新的 fps/bitrate 创建新的编码器
 
 此过程中会短暂丢失几帧（编码器切换约 50-200ms），对预录影响可忽略。
+
+**Surface 模式**（4K@60fps）下：
+- **不重建编码器**（代价太大，需要重建 Camera2 会话）
+- 通过 `CameraController.updateSurfaceFps()` 修改 Camera2 `CONTROL_AE_TARGET_FPS_RANGE`
+- 从缓存中重新添加所有 Surface target，重建 CaptureRequest
+- 帧率变更更平滑，无编码器重建延迟
 
 ---
 
@@ -215,10 +249,12 @@ CameraViewModel.monitorBattery()
 | 模式 | 操作 | CPU 估算 |
 |------|------|---------|
 | 待机 Normal | 30fps YUV+编码 + KWS 100ms | 低 |
-| 待机 Severe | 5fps YUV+编码 + KWS 300ms | 很低 |
+| 待机 Severe | 10fps YUV+编码 + KWS 300ms | 很低 |
+| 录制 720p30 | 30fps YUV+裁剪+缩放+编码 | 低 |
 | 录制 1080p30 | 30fps YUV+裁剪+缩放+编码 | 中 |
 | 录制 1080p60 | 60fps YUV+裁剪+缩放+编码 | 高 |
-| 录制 4K | 30fps 大帧YUV+编码 | 很高 |
+| 录制 4K30 | 30fps 大帧YUV+零拷贝编码 | 高 |
+| 录制 4K60 | Camera2 Surface 零拷贝 | 中（硬件编码） |
 
 ### 内存占用
 
@@ -246,10 +282,14 @@ CameraViewModel.monitorBattery()
 
 | 症状 | 原因 | 位置 |
 |------|------|------|
-| 左半绿色 | UV 平面未写入（remaining() bug） | `YuvConverter.imageToNv12()` |
+| 绿色覆盖 + 左半画面 | `interleaveUv()` 的 `dstOffset` 为 0（应为 `width*height`） | `YuvConverter.imageToNv12()` |
 | 画面拉伸 | 直接缩放未做裁剪 | `cropAndScaleNv12()` 居中裁剪 |
 | BufferOverflow | 相机分辨率与编码器不匹配 | `CameraFramePipeline` 缩放 |
 | 画面卡顿 | 每帧大量分配导致 GC | 缓冲区复用 |
+
+> **重要**: `interleaveUv()` 调用时 `dstOffset` 必须为 `width * height`。
+> 曾因重构时硬编码为 0，导致 UV 覆盖 Y 平面前半部分，1080p/720p 画面变绿。
+> 4K 因走 `feedFrameDirect` 零拷贝路径未受影响。
 
 ### 预录视频只有唤醒后内容（无前半段）
 
@@ -273,3 +313,18 @@ CameraViewModel.monitorBattery()
 2. 确认预录 fps/bitrate 是否已自动降低
 3. 确认 KWS 间隔是否已增加
 4. 考虑降低用户选择的分辨率档位
+
+### 4K@60fps Surface 模式问题
+
+**Surface 模式判断条件**: `width >= 3840 && fps > 30`
+
+**关键日志**:
+- ✅ `CameraController Surface 模式: ...` — Camera2 会话创建成功
+- ✅ `Surface 模式编码器已准备: ...` — 编码器 Surface 创建成功
+- ❌ `Camera2 绑定失败，降级到 ByteBuffer` — 自动降级，不影响功能
+
+**排查步骤**:
+1. 确认设备 Camera2 支持：`adb shell dumpsys media.camera` 查看 `SCALER_STREAM_CONFIGURATION_MAP`
+2. 确认 FPS Range 支持：设备需支持 `[60, 60]` 或包含 60 的范围
+3. 确认 PreviewView 使用 COMPATIBLE 模式（Surface 模式需要从 TextureView 获取 Surface）
+4. 降级回 ByteBuffer 后帧率约 50fps（ISP YUV 带宽瓶颈），属于正常现象

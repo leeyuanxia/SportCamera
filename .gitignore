@@ -7,9 +7,21 @@
 /.idea/workspace.xml
 /.idea/navEditor.xml
 /.idea/assetWizardSettings.xml
+/.idea/deviceManager.xml
+/.idea/deploymentTargetSelector.xml
 .DS_Store
 /build
 /captures
 .externalNativeBuild
 .cxx
 local.properties
+
+# 构建产物
+/app/release/
+*.apk
+*.aab
+
+# 签名密钥（不应入版本控制）
+keystore
+*.jks
+*.keystore

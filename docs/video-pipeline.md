@@ -2,18 +2,20 @@
 
 ## 数据流总览
 
+### 非 4K 分辨率（CameraX ImageAnalysis 路径）
+
 ```
 Camera Sensor
      │
      ▼
-CameraX ImageAnalysis (YUV_420_888, ~30fps)
+CameraX ImageAnalysis (YUV_420_888, ~30fps/60fps)
      │
      ▼
 CameraFramePipeline.analyze()
      │
      ├── ① 帧率节流（skipPattern）
-     ├── ② imageToNv12(): YUV_420_888 → NV12
-     ├── ③ cropAndScaleNv12(): 居中裁剪 + 缩放
+     ├── ② 4K + 无缩放: feedFrameDirect() 零拷贝直入编码器
+     │      其他: imageToNv12() → cropAndScaleNv12()
      │
      ▼
 FrameConsumer.feedFrame(nv12, timestamp, w, h)
@@ -32,6 +34,26 @@ FrameConsumer.feedFrame(nv12, timestamp, w, h)
             │
             ▼
      VideoStorageManager → MediaStore → 系统相册
+```
+
+### 4K@60fps（Camera2 Surface 路径，零拷贝）
+
+```
+Camera Sensor
+     │
+     ▼
+Camera2 CaptureSession
+     ├── Surface 1: PreviewView (预览)
+     └── Surface 2: Encoder InputSurface (编码器直入)
+            │
+            ▼
+     RingBufferRecorder (Surface 输入模式)
+            │ 相机硬件零拷贝 → MediaCodec 硬件编码
+            │ drainEncoder() → EncodedFrame 列表（逻辑完全不变）
+            ▼
+     VideoAssembler → MediaMuxer → MP4 文件
+
+注：CameraFramePipeline.setSurfaceMode(true) 后 analyze() 跳过编码数据流
 ```
 
 ---
@@ -83,8 +105,22 @@ Step 2: UV 平面（优化后）
   vBuffer.get(vBytes)  ← 批量复制，1次 JNI
 
   for (row, col):
-    nv12[...] = uBytes[...]  ← ByteArray 直接索引，无 JNI
-    nv12[...] = vBytes[...]  ← ByteArray 直接索引，无 JNI
+    nv12[uvOffset + row*width + col*2]     = uBytes[...]  ← U
+    nv12[uvOffset + row*width + col*2 + 1] = vBytes[...]  ← V
+    注意: uvOffset = width * height (Y 平面之后)
+```
+
+### imageToNv12Direct() 零拷贝转换
+
+4K 零拷贝路径，YUV 直接写入编码器输入缓冲区：
+
+```
+输入: Image (YUV_420_888) + ByteBuffer (编码器输入缓冲区)
+输出: 无返回值，直接写入 dst ByteBuffer
+
+Step 1: Y 平面 → dst (使用 dst.put 或数组直写)
+Step 2: UV 平面 → dst (interleaveUvToBuffer)
+         dst.position() 已在 Y 数据末尾，UV 追加写入
 ```
 
 ---
@@ -191,7 +227,22 @@ for (y in 0 until dstH) {
   帧率: 30fps (默认) → 热管理可降为 10/6/4/2 fps
   码率: 3Mbps (默认) → 热管理可降为 1M/600K/400K/200K bps
   Profile: High (与 ActiveRecorder 一致，确保 SPS/PPS 兼容)
+  Level: mbPerSec > 1,000,000 时用 Level 5.2（4K@60fps），否则 Level 4
   关键帧间隔: 2s
+
+输入模式:
+  ByteBuffer 模式（默认）:
+    feedFrame(NV12 ByteArray) → dequeueInputBuffer → queueInputBuffer
+    输入超时: 1000μs (1ms)
+
+  Surface 模式（4K@60fps, width >= 3840 && fps > 30）:
+    prepareWithSurface() → createInputSurface() → Camera2 直出
+    相机硬件零拷贝写入，feedFrame() 不被调用
+    停止时释放 inputSurface 触发 EOS
+
+  4K 零拷贝（4K@30fps, width >= 3840 && fps <= 30）:
+    feedFrameDirect(Image) → YUV 直接写入编码器 ByteBuffer
+    输入超时: 5000μs (5ms)
 
 环形缓冲:
   容量 = bitrate × duration / 8
@@ -286,12 +337,13 @@ postFrames PTS: [5000, 36666, 68333, ...]     ← ActiveRecorder
 
 ### 用户可选档位
 
-| Profile | 分辨率 | 帧率 | 码率 | 用途 |
-|---------|--------|------|------|------|
-| HD_720P_30 | 1280×720 | 30fps | 4Mbps | 平衡画质与功耗 |
-| FHD_1080P_30 | 1920×1080 | 30fps | 8Mbps | 高清标准 |
-| FHD_1080P_60 | 1920×1080 | 60fps | 12Mbps | 高帧率运动场景 |
-| UHD_4K_30 | 3840×2160 | 30fps | 20Mbps | 超高清 |
+| Profile | 分辨率 | 帧率 | 码率 | 编码路径 | 用途 |
+|---------|--------|------|------|---------|------|
+| HD_720P_30 | 1280×720 | 30fps | 4Mbps | CameraX ByteBuffer | 平衡画质与功耗 |
+| FHD_1080P_30 | 1920×1080 | 30fps | 8Mbps | CameraX ByteBuffer | 高清标准 |
+| FHD_1080P_60 | 1920×1080 | 60fps | 12Mbps | CameraX ByteBuffer | 高帧率运动场景 |
+| UHD_4K_30 | 3840×2160 | 30fps | 20Mbps | CameraX 零拷贝 (feedFrameDirect) | 超高清 |
+| UHD_4K_60 | 3840×2160 | 60fps | 50Mbps | Camera2 Surface (零拷贝直入) | 超高清高帧率 |
 
 ### 待机模式固定参数
 

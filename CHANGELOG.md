@@ -2,6 +2,62 @@
 
 所有重要更改均记录在此文件中。
 
+## [2026-06-03] 4K@60fps Surface 模式 & 双路径编码
+
+### 新增
+
+- **4K@60fps Camera2 Surface 模式**：使用 Camera2 API 直接将相机输出写入编码器 InputSurface（零拷贝），绕过 CameraX ImageAnalysis 的 ISP YUV 带宽瓶颈，实现真正 60fps
+- **4K 零拷贝路径 (feedFrameDirect)**：4K@30fps 时 YUV 直接写入编码器输入缓冲区，省去 ~12MB ByteArray 中转，减少 3-4ms/帧
+- **ResolutionProfile.UHD_4K_60**：新增 4K 60fps 档位（3840×2160, 60fps, 50Mbps）
+- **DebugLog 统一日志工具**：`util/DebugLog.kt` 封装 `android.util.Log`，Debug 包输出、Release 包完全静默，统一 TAG 前缀 `SportCameraLogger`
+- **CameraController 双模式**：CameraX（非 4K）和 Camera2 Surface（4K@60fps）双模式切换，含 FPS Range 解析、热管理降频
+- **编码器 Level 自动选择**：`mbPerSec > 1,000,000` 使用 Level 5.2（4K@60fps），其他使用 Level 4
+- **Surface 模式降级机制**：Camera2 绑定失败时自动降级回 ByteBuffer 模式
+- **音频预录 (RingBufferAudioRecorder)**：待机时持续采集麦克风 PCM → AAC 编码写入环形缓冲（~480KB/30s），唤醒时与后段音频拼接，确保前半段也有声音
+- **音频录制 (AudioRecorder)**：录制时采集麦克风并编码 AAC-LC，通过 `VideoStorageManager` 与视频合成 MP4
+- **KWS 音频双路采集**：KwsManager 与 RingBufferAudioRecorder 共享一个 AudioRecord 实例，节省音频硬件资源
+- **热管理降频策略改进**：从固定数值表改为用户 profile 百分比降频（Normal=100%, Light=80%, Moderate=67%, Severe=33%, Critical=20%, Emergency=13%, Shutdown=7%），不同分辨率档位自适应
+
+### 修复
+
+- **1080p/720p 画面绿色覆盖 + 左半有画面右半没有**：重构 `YuvConverter.imageToNv12()` 提取 `interleaveUv()` 方法时 `dstOffset` 传了 `0` 而非 `width * height`，导致 UV 数据覆盖 Y 平面前半部分。4K 因走零拷贝路径未受影响
+- **全项目日志统一**：所有 `android.util.Log` 调用替换为 `DebugLog`
+
+### 变更
+
+- `RingBufferRecorder` 新增 Surface 输入模式（`prepareWithSurface()`、`inputSurface`、`useSurfaceInput`）
+- `FrameConsumer` 接口新增 `feedFrameDirect()` 方法（默认返回 false）
+- `CameraFramePipeline` 新增 `surfaceMode` 标志和 `cameraFps` 帧率跟踪
+- `PreRecordManager` 新增 `createSurfaceEncoder()` 和 `encoderSurfaceReady` 回调
+- `VoiceTriggerRecorder` 新增 PreviewView 引用传递和 Surface 模式分支
+- 热管理 Surface 模式：不重建编码器，通过 Camera2 AE FPS Range 控制帧率
+
+### 涉及文件
+
+**新增文件：**
+- `util/DebugLog.kt` — 日志封装工具（Debug 输出/Release 静默）
+- `hardware/audio/RingBufferAudioRecorder.kt` — 音频环形缓冲录制器（待机预录音频）
+- `hardware/audio/AudioRecorder.kt` — 音频录制编码器（录制时 AAC 编码）
+
+**核心修改：**
+- `hardware/camera/CameraController.kt` — Camera2 Surface 模式（`bindPreviewWithSurface`、`updateSurfaceFps`、`resolveSurfaceFpsRange`）
+- `hardware/camera/CameraFramePipeline.kt` — Surface 模式标志、4K 零拷贝路径、`cameraFps` 帧率跟踪
+- `hardware/camera/FrameConsumer.kt` — `imageToNv12Direct()` 零拷贝、`interleaveUvToBuffer()`、`feedFrameDirect()` 接口
+- `hardware/camera/RingBufferRecorder.kt` — Surface 输入模式、Level 自动选择、`feedFrameDirect()`
+- `domain/VoiceTriggerRecorder.kt` — Surface 模式分支、PreviewView 传递、热管理适配
+- `domain/PreRecordManager.kt` — `createSurfaceEncoder()`、`encoderSurfaceReady` 回调、Surface 模式短路
+- `domain/model/ResolutionProfile.kt` — 新增 `UHD_4K_60` 枚举值
+- `viewmodel/CameraViewModel.kt` — `supportedFps` 暴露、PreviewView 传递
+- `hardware/audio/KwsManager.kt` — 双路音频采集（KWS + AAC 编码共享 AudioRecord）
+- `hardware/storage/VideoStorageManager.kt` — AAC 音轨合成支持（`assembleToMp4` 改为 `assembleToMp4WithAudio`）
+- `domain/VideoAssembler.kt` — 合成流程新增音频帧整合
+- `domain/VoiceTriggerRecorder.kt` — 音频预录集成（`ringAudioRecorder` + `audioRecorder`）
+- `power/ThermalThrottler.kt` — 百分比降频策略 + 用户 profile 基准
+- `ui/theme/Color.kt`、`Theme.kt`、`Type.kt` — 主题配色与字体更新
+- `ui/component/RecordIndicator.kt` — 录制指示器组件改进
+
+---
+
 ## [2026-06-02] 省电优化 & 锁屏黑屏修复
 
 ### 修复

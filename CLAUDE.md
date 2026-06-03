@@ -9,7 +9,7 @@
 - **包名**: `cn.leeyuanxia.sportcamera`
 - **定位**: 运动相机 Android App，语音唤醒词自动触发录像
 - **最低版本**: Android 14 (API 34) | **目标版本**: Android 16 (API 36)
-- **技术栈**: Kotlin 100%, Jetpack Compose, CameraX 1.4.1, MediaCodec H.264, sherpa-onnx KWS
+- **技术栈**: Kotlin 100%, Jetpack Compose, CameraX 1.4.1, Camera2 API, MediaCodec H.264, sherpa-onnx KWS
 - **架构**: 单 Activity + MVVM + 手动 DI (`AppContainer`)
 
 ## 目录结构
@@ -23,6 +23,7 @@ app/src/main/java/cn/leeyuanxia/sportcamera/
 ├── data/            # DataStore 设置持久化
 ├── viewmodel/       # ViewModel
 ├── ui/              # Compose UI
+├── util/            # 工具类（DebugLog）
 └── di/              # AppContainer 手动 DI
 ```
 
@@ -97,7 +98,7 @@ private var encoder: MediaCodec? = null
 private var readyToCreate: Boolean = false  // 只在 feedFrame（相机线程）中读写
 ```
 
-> **历史教训（两次迭代）**:
+> **历史教训（三次迭代）**:
 > - 第一轮：`PreRecordManager.ringBuffer` 缺少 `@Volatile`，修复后仍然不工作
 > - 第二轮（真正根因）：`RingBufferRecorder.encoder` 缺少 `@Volatile`
 >   - `prepare()` 在 FrameAnalyzer 线程设置 `encoder = MediaCodec.create(...)`
@@ -105,32 +106,48 @@ private var readyToCreate: Boolean = false  // 只在 feedFrame（相机线程�
 >   - 没有 `@Volatile`，IO 线程始终看到 `null`，drainEncoder 立即返回
 >   - 结果：编码器接收了 249 帧输入但输出从未被 drain，环形缓冲永远为空
 >   - **教训：对象引用的内部字段跨线程访问也需要 @Volatile，不能仅靠外层容器的 @Volatile**
+> - 第三轮（YUV 偏移量 bug）：重构 `YuvConverter.imageToNv12()` 提取 `interleaveUv()` 时 `dstOffset` 传了 `0` 而非 `width * height`
+>   - UV 数据从字节 0 开始写入，覆盖了 Y 平面的前半部分
+>   - 症状：1080p/720p 画面绿色覆盖 + 左半有画面右半没有；4K 正常（走零拷贝路径）
+>   - **教训：重构 NV12/YUV 代码时必须验证 UV 偏移量（`width * height`），分离方法时参数不要硬编码为 0**
 
 ### 4. 日志规范
 
-- 使用 `android.util.Log`，不引入 Timber 等日志库
+- 使用项目封装的 `DebugLog` 工具类（`util/DebugLog.kt`），**不再直接使用 `android.util.Log`**
+- `DebugLog` 统一 TAG 前缀 `SportCameraLogger`，消息格式 `"$tag  ---->$msg"`
+- **Debug 包输出日志，Release 包完全静默**（通过 `BuildConfig.DEBUG` 控制）
 - 关键状态变化必须记录日志：
   - 编码器创建/启动/停止
   - 协程启动/结束
   - 帧计数里程碑（每 150 帧记录一次）
   - 异常和超时
 - 异常日志记录完整信息：异常类型 + 消息
-- 错误路径用 `Log.e`，正常流程用 `Log.d`，罕见/可疑情况用 `Log.w`
+- 错误路径用 `DebugLog.e`，正常流程用 `DebugLog.d`，罕见/可疑情况用 `DebugLog.w`
 
 ### 5. MediaCodec 使用规范
 
-- 使用 **ByteBuffer 输入模式**（非 Surface），通过 `dequeueInputBuffer` / `queueInputBuffer`
-- `dequeueInputBuffer` 超时使用 **1000μs (1ms)**，不用 0（部分设备 timeout=0 抛异常）
+- **双输入模式**：
+  - **ByteBuffer 模式**（默认）：通过 `dequeueInputBuffer` / `queueInputBuffer` 送入 NV12 数据
+  - **Surface 模式**（4K@60fps）：通过 `createInputSurface()` 获取 Surface，Camera2 直接输出到编码器
+- ByteBuffer 模式下 `dequeueInputBuffer` 超时使用 **1000μs (1ms)**，不用 0（部分设备 timeout=0 抛异常）
+- 4K 零拷贝路径（`feedFrameDirect`）超时使用 **5000μs (5ms)**
 - `dequeueOutputBuffer` 超时使用 **10_000μs (10ms)**
 - 编码器启动顺序：`encoder.start()` → `isRunning = true`（防止 feedFrame 在未启动时调用）
-- EOS 发送：ByteBuffer 模式下用 `queueInputBuffer + BUFFER_FLAG_END_OF_STREAM`，需要重试循环
+- EOS 发送：
+  - ByteBuffer 模式：`queueInputBuffer + BUFFER_FLAG_END_OF_STREAM`，需要重试循环
+  - Surface 模式：释放 `inputSurface` 自动触发 EOS
 - `drainEncoder()` 在 `withContext(Dispatchers.IO)` 中运行，`delay(1)` 作为 TRY_AGAIN_LATER 的退避
 
 ### 6. 编码器配置
 
-- RingBufferRecorder（预录）：High Profile, Level 4, 关键帧间隔 2s
-- ActiveRecorder（录制）：High Profile, Level 4, 关键帧间隔 1s
-- 两者使用相同 Profile/Level 以确保 SPS/PPS 兼容（前后段拼接）
+- RingBufferRecorder（预录）：High Profile, 关键帧间隔 2s
+- ActiveRecorder（录制）：High Profile, 关键帧间隔 1s
+- Level 选择策略：
+  - `mbPerSec = (width/16) * (height/16) * fps`
+  - `mbPerSec > 1,000,000` → Level 5.2（4K@60fps 需要）
+  - 其他 → Level 4（1080p 及以下足够）
+- 两者使用相同 Profile 以确保 SPS/PPS 兼容（前后段拼接）
+- Surface 模式（4K@60fps）：`KEY_COLOR_FORMAT` 使用 `COLOR_FormatSurface`，通过 `createInputSurface()` 零拷贝
 
 ### 7. 视频合成规范
 
@@ -146,6 +163,11 @@ private var readyToCreate: Boolean = false  // 只在 feedFrame（相机线程�
 - 帧率节流在 YUV 转换**之前**执行（跳帧零开销）
 - 缓冲区复用：`fullNv12Buffer` / `scaledNv12Buffer` 消除每帧 ~16MB 分配
 - 热管理通过 `ThermalThrottler` 自适应降频，参数变化时才重建编码器
+- **4K@60fps 双路径架构**：
+  - 非 4K 分辨率：CameraX ImageAnalysis → YUV → NV12 → ByteBuffer → 编码器
+  - 4K@60fps：Camera2 API → 编码器 InputSurface（零拷贝，绕过 ISP YUV 带宽瓶颈）
+  - 判断条件：`width >= 3840 && fps > 30` 使用 Surface 模式
+- **Surface 模式热管理**：不重建编码器，通过 Camera2 `CONTROL_AE_TARGET_FPS_RANGE` 控制帧率
 
 ### 9. UI / Compose
 
@@ -169,7 +191,13 @@ private var readyToCreate: Boolean = false  // 只在 feedFrame（相机线程�
 排查预录问题时使用：
 
 ```
-adb logcat -s PreRecordManager:D RingBufferRecorder:D VoiceTrigger:D
+adb logcat -s SportCameraLogger:D
+```
+
+排查 4K Surface 模式问题时使用：
+
+```
+adb logcat -s SportCameraLogger:D | grep -E "CameraController|Surface|Camera2"
 ```
 
 ### 常见问题排查
@@ -179,6 +207,8 @@ adb logcat -s PreRecordManager:D RingBufferRecorder:D VoiceTrigger:D
 ---
 
 ## 文档索引
+
+重要：每次修改新增完代码请记录修改日志
 
 | 文件 | 内容 |
 |------|------|
