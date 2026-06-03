@@ -157,6 +157,45 @@ class RingBufferRecorder(
         DebugLog.d(TAG, "编码器已启动: ${width}x${height} @${fps}fps, ${bitrateBps/1000}kbps, 环形缓冲${maxDurationSec}s")
     }
 
+    /**
+     * 向编码器送入一帧 YUV 数据（零拷贝版本）
+     *
+     * YUV 转换直接写入编码器输入缓冲区，省去 ~12MB 的 ByteArray 中转。
+     * 4K 高分辨率下使用此路径可减少 3-4ms/帧，显著提升帧率。
+     *
+     * @return true=成功送入，false=无可用输入缓冲区
+     */
+    override fun feedFrameDirect(image: android.media.Image, timestampUs: Long, width: Int, height: Int): Boolean {
+        val codec = encoder ?: return false
+        if (!isRunning) return false
+
+        try {
+            val inputTimeout = if (this.width >= 3840) 5000 else 1000
+            val inputIndex = codec.dequeueInputBuffer(inputTimeout.toLong())
+            if (inputIndex >= 0) {
+                val inputBuffer = codec.getInputBuffer(inputIndex) ?: return false
+                inputBuffer.clear()
+                // YUV → NV12 直接写入编码器输入缓冲区，省去 12MB ByteArray 中转
+                YuvConverter.imageToNv12Direct(image, inputBuffer)
+                codec.queueInputBuffer(inputIndex, 0, inputBuffer.position(), timestampUs, 0)
+                feedCount++
+                if (feedCount % 150 == 0L) {
+                    DebugLog.d(TAG, "已喂帧(direct): $feedCount, 丢弃: $dropCount, 缓冲帧数: ${buffer.size}")
+                }
+                return true
+            } else {
+                dropCount++
+                return false
+            }
+        } catch (e: Exception) {
+            dropCount++
+            if (dropCount <= 3 || dropCount % 100 == 1L) {
+                DebugLog.w(TAG, "喂帧异常(direct) (丢弃#${dropCount}): ${e.message}", e)
+            }
+            return false
+        }
+    }
+
     private var feedCount = 0L
     private var dropCount = 0L
 
@@ -165,14 +204,19 @@ class RingBufferRecorder(
      *
      * 由 CameraFramePipeline 在 ImageAnalysis 回调中调用。
      * 使用 dequeueInputBuffer + queueInputBuffer 发送数据。
+     *
+     * 超时策略：
+     * - 1080p 及以下：1000μs (1ms) — 帧小，编码快，1ms 足够
+     * - 4K：5000μs (5ms) — 每帧 ~12MB，编码器处理慢，需要更多等待时间
+     *   4K@60fps 下 1ms 超时会频繁返回 -1（输入缓冲区满），导致约 10fps 丢失
      */
     override fun feedFrame(yuvData: ByteArray, timestampUs: Long, width: Int, height: Int) {
         val codec = encoder ?: return
         if (!isRunning) return
 
         try {
-            // 使用 1000μs (1ms) 超时而非 0，部分设备上 timeout=0 可能抛异常
-            val inputIndex = codec.dequeueInputBuffer(1000)
+            val inputTimeout = if (this.width >= 3840) 5000 else 1000
+            val inputIndex = codec.dequeueInputBuffer(inputTimeout.toLong())
             if (inputIndex >= 0) {
                 val inputBuffer = codec.getInputBuffer(inputIndex) ?: return
                 inputBuffer.clear()

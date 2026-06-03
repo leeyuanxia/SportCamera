@@ -131,7 +131,25 @@ class PreRecordManager : FrameConsumer {
     }
 
     override fun feedFrame(yuvData: ByteArray, timestampUs: Long, width: Int, height: Int) {
-        // 检测分辨率变化（用户切换了画质档位），重建编码器
+        ensureEncoder(width, height)
+        ringBuffer?.feedFrame(yuvData, timestampUs, width, height)
+    }
+
+    /**
+     * 零拷贝喂帧（4K 高分辨率路径）
+     *
+     * 编码器创建逻辑与 feedFrame 完全相同，区别仅在于帧数据
+     * 直接写入编码器输入缓冲区，省去 ~12MB 的 ByteArray 中转。
+     */
+    override fun feedFrameDirect(image: android.media.Image, timestampUs: Long, width: Int, height: Int): Boolean {
+        ensureEncoder(width, height)
+        return ringBuffer?.feedFrameDirect(image, timestampUs, width, height) ?: false
+    }
+
+    /**
+     * 编码器创建/重建逻辑（feedFrame 和 feedFrameDirect 共用）
+     */
+    private fun ensureEncoder(width: Int, height: Int) {
         val resolutionChanged = (cameraWidth > 0 && width > 0 && height > 0
             && (width != cameraWidth || height != cameraHeight))
 
@@ -148,7 +166,6 @@ class PreRecordManager : FrameConsumer {
             DebugLog.d(TAG, "首帧/分辨率变更: ${width}x${height}, readyToCreate=$readyToCreate, drainStarted=$drainStarted")
         }
 
-        // 满足条件时自动创建编码器
         if (readyToCreate && !drainStarted && cameraWidth > 0) {
             val config = throttleConfig
             createBuffer(
@@ -157,8 +174,6 @@ class PreRecordManager : FrameConsumer {
                 bitrateBps = config?.preRecordBitrateBps ?: currentProfile.bitrateBps,
             )
         }
-
-        ringBuffer?.feedFrame(yuvData, timestampUs, width, height)
     }
 
     /**
