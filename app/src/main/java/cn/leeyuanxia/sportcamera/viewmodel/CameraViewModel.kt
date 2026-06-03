@@ -100,6 +100,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     /** 当前摄像头是否支持 EIS（硬件能力检测结果） */
     val eisSupported: StateFlow<Boolean> = cameraController.eisSupported
 
+    /** 当前缩放倍率（1.0x = 无缩放） */
+    val zoomRatio: StateFlow<Float> = cameraController.zoomRatio
+
+    /** 最大缩放倍率 */
+    val maxZoomRatio: StateFlow<Float> = cameraController.maxZoomRatio
+
     /** 预览画面是否可见 — 待机时隐藏，录制时显示，支持 30s 窥视 */
     private val _previewVisible = MutableStateFlow(true)
     val previewVisible: StateFlow<Boolean> = _previewVisible.asStateFlow()
@@ -308,6 +314,15 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 DebugLog.w(TAG, "镜头切换失败 — 相机尚未绑定")
             }
         }
+    }
+
+    /**
+     * 应用缩放增量（双指捏合时调用）
+     *
+     * @param delta 缩放倍率乘数（>1.0 放大，<1.0 缩小）
+     */
+    fun applyZoomDelta(delta: Float) {
+        cameraController.applyZoomDelta(delta)
     }
 
     fun setPreRecordDuration(duration: PreRecordDuration) {

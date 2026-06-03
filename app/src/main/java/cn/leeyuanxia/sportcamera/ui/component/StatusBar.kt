@@ -53,6 +53,7 @@ fun StatusBar(
     preRecordDuration: PreRecordDuration,
     availableLenses: List<CameraLens>,
     currentLens: CameraLens,
+    zoomRatio: Float,
     batteryLevel: Int,
     onLensSwitch: (CameraLens) -> Unit,
     modifier: Modifier = Modifier,
@@ -68,7 +69,7 @@ fun StatusBar(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // 左侧：状态灯 + 文字
+            // 左侧：状态灯 + 文字 + 缩放倍率
             Row(verticalAlignment = Alignment.CenterVertically) {
                 StatusDot(appState)
                 Spacer(Modifier.width(8.dp))
@@ -78,6 +79,24 @@ fun StatusBar(
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Medium,
                 )
+                // 缩放倍率指示（仅非 1.0x 时显示）
+                if (zoomRatio > 1.05f) {
+                    Spacer(Modifier.width(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(ChipSelected)
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = String.format("%.1fx", zoomRatio),
+                            color = ChipSelectedText,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
             }
 
             // 右侧：时长 + 电量

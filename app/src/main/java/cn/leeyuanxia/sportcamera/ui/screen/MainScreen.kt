@@ -9,6 +9,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -73,6 +74,8 @@ fun MainScreen(viewModel: CameraViewModel) {
     val uiVisible by viewModel.uiVisible.collectAsState()
     val videoStabilization by viewModel.videoStabilization.collectAsState()
     val eisSupported by viewModel.eisSupported.collectAsState()
+    val zoomRatio by viewModel.zoomRatio.collectAsState()
+    val maxZoomRatio by viewModel.maxZoomRatio.collectAsState()
 
     val context = LocalContext.current
     val activity = context as? ComponentActivity
@@ -131,6 +134,16 @@ fun MainScreen(viewModel: CameraViewModel) {
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black)
+                // 双指捏合缩放：在预览画面上控制缩放倍率
+                .pointerInput(maxZoomRatio) {
+                    detectTransformGestures { _, _, zoomChange, _ ->
+                        if (zoomChange != 1.0f && maxZoomRatio > 1.0f) {
+                            // 阻尼：将原始变化量向 1.0 压缩，手势更细腻
+                            val damped = 1.0f + (zoomChange - 1.0f) * 0.4f
+                            viewModel.applyZoomDelta(damped)
+                        }
+                    }
+                }
                 // 点击预览画面切换 UI 显示/隐藏
                 .pointerInput(Unit) {
                     detectTapGestures { viewModel.toggleUi() }
@@ -178,6 +191,7 @@ fun MainScreen(viewModel: CameraViewModel) {
                     preRecordDuration = preRecordDuration,
                     availableLenses = availableLenses,
                     currentLens = currentLens,
+                    zoomRatio = zoomRatio,
                     batteryLevel = batteryLevel,
                     onLensSwitch = viewModel::switchLens,
                 )

@@ -215,3 +215,30 @@ adb logcat -s SportCameraLogger:D | grep -E "CameraController|Surface|Camera2"
 | `docs/architecture.md` | 项目架构、模块职责、数据流 |
 | `docs/video-pipeline.md` | 视频管线详解（YUV转换、编码、合成） |
 | `docs/performance-and-power.md` | 省电优化、热管理、故障排查 |
+
+---
+
+## 修改日志
+
+### 2026-06-03：新增长焦 (TELEPHOTO) 镜头支持（已移除）
+
+初始实现通过 TELEPHOTO 枚举 + CameraSelector 直接绑定长焦物理子相机，
+但因切换需 unbindAll → rebind 导致画面卡顿，改为通过双指缩放在逻辑相机上使用
+`CameraControl.setZoomRatio()` 实现，CameraX 内部自动处理多摄切换。
+
+已移除：TELEPHOTO 枚举、checkFocalLengthForTelephoto()、resolveCameraSelector TELEPHOTO 分支。
+
+### 2026-06-03：新增双指捏合缩放（限制单摄数字缩放）
+
+**修改文件：**
+- `hardware/camera/CameraController.kt` — 新增缩放控制
+- `viewmodel/CameraViewModel.kt` — 暴露缩放状态和方法
+- `ui/screen/MainScreen.kt` — 添加双指捏合缩放手势
+- `ui/component/StatusBar.kt` — 缩放倍率指示器（非 1.0x 时显示）
+
+**改动内容：**
+- 使用 `setLinearZoom()` 而非 `setZoomRatio()`，FOV 线性映射手感更自然
+- 最大缩放限制在 `DEFAULT_ZOOM_CAP = 3.0x`，避免触发物理相机切换导致 FOV 中心跳变
+- `applyZoomDelta()` 从 `zoomState.linearZoom` 读取实际值作为基准，避免缓存过期
+- 镜头切换/重新绑定时自动重置为 1.0x
+- Surface 模式（4K@60fps）下不支持缩放

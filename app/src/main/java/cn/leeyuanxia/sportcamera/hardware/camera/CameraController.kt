@@ -102,10 +102,24 @@ class CameraController(private val context: Context) {
     /** Camera2 专用 Handler */
     private var camera2Handler: Handler? = null
 
+    /** CameraX 绑定返回的 Camera 对象（用于缩放控制） */
+    @Volatile
+    private var boundCamera: androidx.camera.core.Camera? = null
+
     /** 当前是否处于 Camera2 Surface 模式 */
     @Volatile
     var isSurfaceMode: Boolean = false
         private set
+
+    // ---- 缩放控制 ----
+
+    /** 当前缩放倍率（从 zoomState 同步，反映 HAL 实际值） */
+    private val _zoomRatio = MutableStateFlow(1.0f)
+    val zoomRatio: StateFlow<Float> = _zoomRatio.asStateFlow()
+
+    /** 最大缩放倍率（从 CameraInfo.zoomState 获取） */
+    private val _maxZoomRatio = MutableStateFlow(1.0f)
+    val maxZoomRatio: StateFlow<Float> = _maxZoomRatio.asStateFlow()
 
     // ---- 视频防抖 (EIS) ----
 
@@ -421,10 +435,14 @@ class CameraController(private val context: Context) {
             val imageAnalysis = analysisBuilder.build()
             imageAnalysis.setAnalyzer(analyzerExecutor, framePipeline)
 
-            provider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, imageAnalysis)
+            val camera = provider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, imageAnalysis)
+            boundCamera = camera
+            initZoomFromCamera(camera)
             framePipeline.setCameraFps(lastAppliedFps)
         } else {
-            provider.bindToLifecycle(lifecycleOwner, cameraSelector, preview)
+            val camera = provider.bindToLifecycle(lifecycleOwner, cameraSelector, preview)
+            boundCamera = camera
+            initZoomFromCamera(camera)
         }
 
         _currentLens.value = lens
@@ -941,6 +959,66 @@ class CameraController(private val context: Context) {
         }, handler)
     }
 
+    // ---- 缩放控制方法 ----
+
+    /**
+     * 从绑定的 Camera 对象初始化缩放范围
+     *
+     * 每次绑定/重新绑定摄像头后调用，读取 min/max zoom ratio。
+     * 同时将当前缩放重置为 1.0x（切换镜头后）。
+     */
+    /**
+     * 从绑定的 Camera 对象初始化缩放范围
+     *
+     * 每次绑定/重新绑定摄像头后调用，读取 min/max zoom ratio。
+     * 同时将当前缩放重置为 1.0x（切换镜头后）。
+     */
+    private fun initZoomFromCamera(camera: androidx.camera.core.Camera) {
+        try {
+            val zoomState = camera.cameraInfo.zoomState.value
+            if (zoomState != null) {
+                _maxZoomRatio.value = zoomState.maxZoomRatio
+                DebugLog.d(TAG, "缩放范围: ${zoomState.minZoomRatio}x ~ ${zoomState.maxZoomRatio}x")
+            } else {
+                _maxZoomRatio.value = 1.0f
+                DebugLog.w(TAG, "zoomState 为 null，缩放不可用")
+            }
+        } catch (e: Exception) {
+            DebugLog.w(TAG, "读取缩放范围失败: ${e.message}")
+            _maxZoomRatio.value = 1.0f
+        }
+        // 镜头切换/重新绑定时重置缩放
+        _zoomRatio.value = 1.0f
+        try {
+            camera.cameraControl.setZoomRatio(1.0f)
+        } catch (_: Exception) {}
+    }
+
+    /**
+     * 应用缩放增量（双指捏合时调用）
+     *
+     * 从 zoomState 读取实际缩放值作为基准（非缓存值），
+     * 避免 CameraX 物理相机切换后基准不准导致跳变。
+     *
+     * @param delta 缩放乘数（>1.0 放大，<1.0 缩小）
+     */
+    fun applyZoomDelta(delta: Float) {
+        val camera = boundCamera ?: return
+        if (isSurfaceMode) return
+
+        val zoomState = camera.cameraInfo.zoomState.value ?: return
+        val actualRatio = zoomState.zoomRatio
+        val newRatio = (actualRatio * delta).coerceIn(1.0f, _maxZoomRatio.value)
+        if (kotlin.math.abs(newRatio - actualRatio) < 0.01f) return
+
+        try {
+            camera.cameraControl.setZoomRatio(newRatio)
+            _zoomRatio.value = newRatio
+        } catch (e: Exception) {
+            DebugLog.w(TAG, "设置缩放失败: ${e.message}")
+        }
+    }
+
     /**
      * 解析镜头对应的 CameraSelector
      */
@@ -973,6 +1051,9 @@ class CameraController(private val context: Context) {
         stopCamera2Session()
         cameraProvider?.unbindAll()
         cameraProvider = null
+        boundCamera = null
+        _zoomRatio.value = 1.0f
+        _maxZoomRatio.value = 1.0f
         analyzerExecutor.shutdownNow()
     }
 
