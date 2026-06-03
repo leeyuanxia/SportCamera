@@ -68,6 +68,7 @@ fun MainScreen(viewModel: CameraViewModel) {
     val resolutionProfile by viewModel.resolutionProfile.collectAsState()
     val recordOrientation by viewModel.recordOrientation.collectAsState()
     val batteryLevel by viewModel.batteryLevel.collectAsState()
+    val supportedFps by viewModel.supportedFps.collectAsState()
     val previewVisible by viewModel.previewVisible.collectAsState()
     val uiVisible by viewModel.uiVisible.collectAsState()
 
@@ -195,6 +196,7 @@ fun MainScreen(viewModel: CameraViewModel) {
                     selectedDuration = preRecordDuration,
                     selectedProfile = resolutionProfile,
                     selectedOrientation = recordOrientation,
+                    supportedFps = supportedFps,
                     previewVisible = previewVisible,
                     onStartStandby = viewModel::startStandby,
                     onStopStandby = viewModel::stopStandby,

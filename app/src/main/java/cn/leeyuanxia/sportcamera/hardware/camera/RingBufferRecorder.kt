@@ -98,27 +98,43 @@ class RingBufferRecorder(
      *
      * 编码器配置为接受 YUV420 数据（通过 dequeueInputBuffer/queueInputBuffer），
      * 而非 Surface 输入。
+     *
+     * Level 选择策略：
+     * - 4K@60fps 需要 Level 5.2（MaxMBps=2,073,600 ≥ 4K@60fps 的 1,944,000）
+     * - Level 4 最大 MaxMBps=245,760，仅支持 4K@30fps 或 1080p@60fps
+     *
+     * 注意：部分硬件编码器对非标准 Level 值支持不佳，可能退化到软件编码。
+     * 对于非 4K 分辨率，保守使用 Level 4（编码器实际输出能力不受 Level 参数限制）。
      */
     fun prepare() {
+        // 根据分辨率和帧率选择合适的 AVC Level
+        // 仅 4K@60fps 需要升级 Level，其他档位使用 Level 4 即可
+        val mbPerFrame = (width / 16) * (height / 16)
+        val mbPerSec = mbPerFrame * fps
+        val avcLevel = when {
+            mbPerSec > 1_000_000 -> MediaCodecInfo.CodecProfileLevel.AVCLevel52  // 4K@60fps
+            else -> MediaCodecInfo.CodecProfileLevel.AVCLevel4                   // 其他档位
+        }
+
         val format = MediaFormat.createVideoFormat(
             MediaFormat.MIMETYPE_VIDEO_AVC, width, height
         ).apply {
             setInteger(MediaFormat.KEY_BIT_RATE, bitrateBps)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2) // 每 2s 一个关键帧
+            // 关键帧间隔保持 2s：dumpRecentFrames 已修复从关键帧开始，
+            // 无需缩短间隔。间隔过短会导致关键帧过多，编码器在 ByteBuffer
+            // 模式下吞吐不足，输入缓冲区溢出丢帧（1080p@60fps 实测退化为 20fps）
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
             setInteger(
                 MediaFormat.KEY_COLOR_FORMAT,
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
             )
-            // 使用 High Profile 与 ActiveRecorder 一致，确保 SPS/PPS 兼容可直接拼接
+            // 使用 High Profile，Level 根据分辨率/帧率选择
             setInteger(
                 MediaFormat.KEY_PROFILE,
                 MediaCodecInfo.CodecProfileLevel.AVCProfileHigh
             )
-            setInteger(
-                MediaFormat.KEY_LEVEL,
-                MediaCodecInfo.CodecProfileLevel.AVCLevel4
-            )
+            setInteger(MediaFormat.KEY_LEVEL, avcLevel)
         }
 
         encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
@@ -280,7 +296,11 @@ class RingBufferRecorder(
     fun dumpAllFrames(): List<EncodedFrame> = buffer.toList()
 
     /**
-     * 获取最近的 N 毫秒帧数据
+     * 获取最近的 N 毫秒帧数据，确保从关键帧开始
+     *
+     * 关键修复：按时间戳过滤后，向前回溯到第一个关键帧（IDR），
+     * 确保输出视频从可解码的帧开始。否则起始的 P 帧无法独立解码，
+     * 播放器会显示冻结画面直到下一个 IDR 出现（最长 = KEY_I_FRAME_INTERVAL）。
      */
     fun dumpRecentFrames(durationMs: Long): List<EncodedFrame> {
         val allFrames = buffer.toList()
@@ -289,7 +309,34 @@ class RingBufferRecorder(
         val latestTime = allFrames.last().presentationTimeUs
         val targetStartTime = latestTime - durationMs * 1000
 
-        return allFrames.filter { it.presentationTimeUs >= targetStartTime }
+        // 按时间戳过滤
+        val timeFiltered = allFrames.filter { it.presentationTimeUs >= targetStartTime }
+        if (timeFiltered.isEmpty()) return emptyList()
+
+        // 向前回溯到第一个关键帧（包括时间窗口之前的帧）
+        // P 帧无法独立解码，必须从 IDR 帧开始
+        val firstKeyFrameIndex = timeFiltered.indexOfFirst { it.isKeyFrame() }
+        if (firstKeyFrameIndex > 0) {
+            // 起始帧是 P 帧，需要向前在原始缓冲中找最近的 IDR
+            val firstFilteredPts = timeFiltered.first().presentationTimeUs
+            val keyFrameBefore = allFrames
+                .filter { it.presentationTimeUs < firstFilteredPts && it.isKeyFrame() }
+                .lastOrNull()
+
+            if (keyFrameBefore != null) {
+                // 从原始缓冲中包含该关键帧到时间窗口起始之间的所有帧
+                val bridgeFrames = allFrames.filter {
+                    it.presentationTimeUs >= keyFrameBefore.presentationTimeUs
+                    && it.presentationTimeUs < firstFilteredPts
+                }
+                return bridgeFrames + timeFiltered
+            }
+
+            // 没有找到前导关键帧 → 丢弃第一个 IDR 之前的 P 帧
+            return timeFiltered.drop(firstKeyFrameIndex)
+        }
+
+        return timeFiltered
     }
 
     /**

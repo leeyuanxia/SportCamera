@@ -10,11 +10,20 @@ import kotlinx.coroutines.flow.asStateFlow
 /**
  * 温度自适应降频器
  *
- * 监听 Android ThermalService 回调，自动调整预录参数：
- * - Normal → 30fps / 3Mbps（默认）
- * - Moderate → 20fps / 2Mbps（降低编码负载）
- * - Severe → 10fps / 1Mbps（大幅降低）
- * - Emergency → 4fps / 400Kbps（最低功耗保命）
+ * 监听 Android ThermalService 回调，自动调整预录参数。
+ * 以用户选择的 profileFps/profileBitrate 为基准，按热等级比例降频：
+ * - Normal → 100%（用户选择的帧率和码率）
+ * - Light → 80%
+ * - Moderate → 67%
+ * - Severe → 33%
+ * - Critical → 20%
+ * - Emergency → 13%
+ * - Shutdown → 7%
+ *
+ * 典型值（以 60fps / 12Mbps 为例）：
+ * - Normal → 60fps / 12Mbps
+ * - Moderate → 40fps / 8Mbps
+ * - Severe → 20fps / 4Mbps
  */
 class ThermalThrottler(private val context: Context) {
 
@@ -28,29 +37,82 @@ class ThermalThrottler(private val context: Context) {
         val kwsReadIntervalMs: Long,
     )
 
+    /** 用户选择的 profile 帧率（默认 30） */
+    @Volatile
+    private var profileFps: Int = 30
+
+    /** 用户选择的 profile 码率（默认 3Mbps） */
+    @Volatile
+    private var profileBitrateBps: Int = 3_000_000
+
+    /** 当前热等级 */
+    private var currentThermalStatus: Int = PowerManager.THERMAL_STATUS_NONE
+
     private val _config = MutableStateFlow(ThrottleConfig(30, 3_000_000, 100))
     val config: StateFlow<ThrottleConfig> = _config.asStateFlow()
 
     private val _thermalLevel = MutableStateFlow("Normal")
     val thermalLevel: StateFlow<String> = _thermalLevel.asStateFlow()
 
+    /**
+     * 设置用户的 profile 参数
+     *
+     * 当用户切换分辨率/帧率档位时调用，热管理配置会基于新参数重新计算。
+     * 例如从 1080P@30fps 切换到 1080P@60fps，Normal 状态下的 preRecordFps
+     * 会从 30 变为 60。
+     */
+    fun setProfileParams(fps: Int, bitrateBps: Int) {
+        if (profileFps == fps && profileBitrateBps == bitrateBps) return
+        profileFps = fps
+        profileBitrateBps = bitrateBps
+        DebugLog.d(TAG, "Profile 更新: ${fps}fps / ${bitrateBps / 1000}kbps, 重新计算热管理配置")
+        recalculateConfig(currentThermalStatus)
+    }
+
     init {
         val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
 
         // API 34+ addThermalStatusListener
         pm.addThermalStatusListener { status ->
-            val newConfig = when (status) {
-                PowerManager.THERMAL_STATUS_LIGHT -> ThrottleConfig(24, 2_400_000, 120)
-                PowerManager.THERMAL_STATUS_MODERATE -> ThrottleConfig(20, 2_000_000, 150)
-                PowerManager.THERMAL_STATUS_SEVERE -> ThrottleConfig(10, 1_000_000, 300)
-                PowerManager.THERMAL_STATUS_CRITICAL -> ThrottleConfig(6, 600_000, 500)
-                PowerManager.THERMAL_STATUS_EMERGENCY -> ThrottleConfig(4, 400_000, 800)
-                PowerManager.THERMAL_STATUS_SHUTDOWN -> ThrottleConfig(2, 200_000, 1000)
-                else -> ThrottleConfig(30, 3_000_000, 100) // Normal / None
-            }
-            _config.value = newConfig
-            _thermalLevel.value = thermalStatusToString(status)
+            currentThermalStatus = status
+            recalculateConfig(status)
         }
+    }
+
+    /**
+     * 根据当前热等级和用户 profile 参数，重新计算预录配置
+     */
+    private fun recalculateConfig(status: Int) {
+        val ratio = when (status) {
+            PowerManager.THERMAL_STATUS_LIGHT -> 0.8
+            PowerManager.THERMAL_STATUS_MODERATE -> 0.667
+            PowerManager.THERMAL_STATUS_SEVERE -> 0.333
+            PowerManager.THERMAL_STATUS_CRITICAL -> 0.2
+            PowerManager.THERMAL_STATUS_EMERGENCY -> 0.133
+            PowerManager.THERMAL_STATUS_SHUTDOWN -> 0.067
+            else -> 1.0 // Normal / None
+        }
+
+        val fps = maxOf(2, (profileFps * ratio).toInt())
+        val bitrateBps = maxOf(200_000, (profileBitrateBps * ratio).toInt())
+
+        // KWS 间隔不按比例，按热等级固定值（避免高频时延迟过大）
+        val kwsIntervalMs = when (status) {
+            PowerManager.THERMAL_STATUS_LIGHT -> 120L
+            PowerManager.THERMAL_STATUS_MODERATE -> 150L
+            PowerManager.THERMAL_STATUS_SEVERE -> 300L
+            PowerManager.THERMAL_STATUS_CRITICAL -> 500L
+            PowerManager.THERMAL_STATUS_EMERGENCY -> 800L
+            PowerManager.THERMAL_STATUS_SHUTDOWN -> 1000L
+            else -> 100L
+        }
+
+        val newConfig = ThrottleConfig(fps, bitrateBps, kwsIntervalMs)
+        val levelName = thermalStatusToString(status)
+        DebugLog.d(TAG, "热管理配置: level=$levelName, ratio=${"%.1f".format(ratio)}, " +
+                "${fps}fps / ${bitrateBps / 1000}kbps (profile: ${profileFps}fps / ${profileBitrateBps / 1000}kbps)")
+        _config.value = newConfig
+        _thermalLevel.value = levelName
     }
 
     private fun thermalStatusToString(status: Int): String = when (status) {

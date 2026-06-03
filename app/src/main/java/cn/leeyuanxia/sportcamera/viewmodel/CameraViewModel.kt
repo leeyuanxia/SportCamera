@@ -88,6 +88,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     val batteryLevel: StateFlow<Int> = container.powerStateManager.batteryLevel
 
+    /** 摄像头硬件支持的帧率（从 CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES 查询） */
+    val supportedFps: StateFlow<Set<Int>> = cameraController.supportedFps
+
     /** 预览画面是否可见 — 待机时隐藏，录制时显示，支持 30s 窥视 */
     private val _previewVisible = MutableStateFlow(true)
     val previewVisible: StateFlow<Boolean> = _previewVisible.asStateFlow()
@@ -117,6 +120,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 voiceTriggerRecorder.setResolutionProfile(profile)
                 voiceTriggerRecorder.setRecordOrientation(orientation)
                 framePipeline.setTargetSize(profile.width, profile.height)
+                // profile 变化时重新绑定摄像头，让帧率和分辨率生效
+                cameraController.rebindWithProfile(profile.width, profile.height, profile.fps)
             }
         }
         // 根据 AppState 自动切换预览可见性
@@ -187,6 +192,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             framePipeline = framePipeline,
             encoderWidth = profile.width,
             encoderHeight = profile.height,
+            fps = profile.fps,
         )
     }
 

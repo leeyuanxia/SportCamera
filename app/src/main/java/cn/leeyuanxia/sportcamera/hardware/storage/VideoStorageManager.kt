@@ -33,8 +33,17 @@ class VideoStorageManager(private val context: Context) {
         private const val TAG = "VideoStorage"
     }
 
-    fun createOutputFile(): VideoOutput {
-        val fileName = "${FILE_PREFIX}${DATE_FORMAT.format(Date())}${FILE_EXTENSION}"
+    /**
+     * 创建输出文件
+     *
+     * @param resolutionLabel 分辨率标签（如 "720p"、"1080p"、"4K"）
+     * @param fps 帧率
+     */
+    fun createOutputFile(resolutionLabel: String = "", fps: Int = 0): VideoOutput {
+        val resTag = if (resolutionLabel.isNotEmpty() && fps > 0) {
+            "_${resolutionLabel}_${fps}fps"
+        } else ""
+        val fileName = "${FILE_PREFIX}${DATE_FORMAT.format(Date())}$resTag${FILE_EXTENSION}"
 
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, fileName)

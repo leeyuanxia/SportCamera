@@ -54,7 +54,10 @@ class VideoAssembler(
         csd1Data: ByteArray? = null,
         onProgress: (Float) -> Unit = {},
     ): String {
-        val output = storageManager.createOutputFile()
+        val output = storageManager.createOutputFile(
+            resolutionLabel = "${profile.height}p",
+            fps = profile.fps,
+        )
 
         val rotation = when (orientation) {
             RecordOrientation.PORTRAIT -> 90

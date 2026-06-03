@@ -4,25 +4,26 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 
-// 运动相机 — 深色主题（默认且唯一主题）
-private val DarkColorScheme = darkColorScheme(
-    primary = StatusStandby,
+private val SportCameraColorScheme = darkColorScheme(
+    primary = AccentAmber,
     onPrimary = Black,
-    secondary = StatusRecording,
+    secondary = StatusSaving,
     onSecondary = Black,
-    tertiary = StatusSaving,
+    tertiary = StatusRecording,
     background = Black,
     onBackground = TextPrimary,
     surface = DarkGray,
     onSurface = TextPrimary,
     surfaceVariant = MediumGray,
     onSurfaceVariant = TextSecondary,
+    error = StatusError,
+    onError = Black,
 )
 
 @Composable
 fun SportCameraTheme(content: @Composable () -> Unit) {
     MaterialTheme(
-        colorScheme = DarkColorScheme,
+        colorScheme = SportCameraColorScheme,
         typography = SportCameraTypography,
         content = content,
     )

@@ -55,19 +55,32 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
         DebugLog.d(TAG, "目标编码尺寸: ${width}x${height}")
     }
 
+    // 摄像头实际输出帧率（由 CameraController 通过 Camera2 interop 设置后通知）
+    @Volatile
+    private var cameraFps: Int = 30
+
+    /**
+     * 设置摄像头实际输出帧率
+     *
+     * 由 CameraController 在每次 bindPreview 时同步传入，
+     * 与 Camera2 interop 设置的 CONTROL_AE_TARGET_FPS_RANGE 保持一致。
+     */
+    fun setCameraFps(fps: Int) {
+        cameraFps = fps
+        DebugLog.d(TAG, "摄像头帧率: ${fps}fps")
+    }
+
     /**
      * 设置目标帧率（用于帧率节流）
      *
-     * 相机输出约 30fps。当目标帧率低于 30 时，按比例跳帧。
+     * 摄像头输出 cameraFps 帧。当目标帧率低于 cameraFps 时，按比例跳帧。
      * 跳帧在 YUV 转换之前执行，节省 CPU、内存带宽和电池。
      *
-     * @param fps 目标帧率（如待机 30fps、录制 30fps）
+     * @param fps 目标帧率（如待机 30fps、录制 60/90fps）
      */
     fun setTargetFps(fps: Int) {
-        // 相机通常输出 30fps，计算跳帧比例
-        val estimatedCameraFps = 30
-        skipPattern = (estimatedCameraFps / fps).coerceAtLeast(1)
-        DebugLog.d(TAG, "目标帧率: ${fps}fps, 跳帧比例: 1/${skipPattern}")
+        skipPattern = (cameraFps / fps).coerceAtLeast(1)
+        DebugLog.d(TAG, "目标帧率: ${fps}fps, 摄像头=${cameraFps}fps, 跳帧比例: 1/${skipPattern}")
     }
 
     /**

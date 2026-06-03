@@ -84,6 +84,8 @@ class VoiceTriggerRecorder(
     fun setResolutionProfile(profile: ResolutionProfile) {
         currentProfile = profile
         preRecordManager.setProfile(profile)
+        // 同步 profile 帧率/码率到热管理，使其基于用户选择计算降频配置
+        thermalThrottler.setProfileParams(profile.fps, profile.bitrateBps)
     }
 
     fun setRecordOrientation(orientation: RecordOrientation) {

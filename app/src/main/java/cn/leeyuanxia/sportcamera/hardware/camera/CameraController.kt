@@ -9,6 +9,7 @@ import android.view.Surface
 import androidx.annotation.OptIn
 import cn.leeyuanxia.sportcamera.util.DebugLog
 import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
@@ -53,6 +54,10 @@ class CameraController(private val context: Context) {
     private val _availableLenses = MutableStateFlow<List<CameraLens>>(emptyList())
     val availableLenses: StateFlow<List<CameraLens>> = _availableLenses.asStateFlow()
 
+    /** 摄像头硬件支持的帧率集合（从 CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES 提取） */
+    private val _supportedFps = MutableStateFlow<Set<Int>>(setOf(30))
+    val supportedFps: StateFlow<Set<Int>> = _supportedFps.asStateFlow()
+
     /** ImageAnalysis 回调用的单线程执行器 */
     private val analyzerExecutor: ExecutorService = Executors.newSingleThreadExecutor {
         Thread(it, "FrameAnalyzer").apply { isDaemon = true }
@@ -65,6 +70,8 @@ class CameraController(private val context: Context) {
     private var lastEncoderWidth: Int = 1280
     private var lastEncoderHeight: Int = 720
     private var lastOrientation: RecordOrientation = RecordOrientation.LANDSCAPE
+    private var lastFps: Int = 30
+    private var lastAppliedFps: Int = 30
 
     /**
      * 初始化 CameraProvider 并检测可用镜头
@@ -257,6 +264,7 @@ class CameraController(private val context: Context) {
         framePipeline: CameraFramePipeline? = null,
         encoderWidth: Int = 1280,
         encoderHeight: Int = 720,
+        fps: Int = 30,
     ) {
         val provider = cameraProvider
             ?: ProcessCameraProvider.getInstance(context).await().also {
@@ -270,8 +278,13 @@ class CameraController(private val context: Context) {
         lastEncoderWidth = encoderWidth
         lastEncoderHeight = encoderHeight
         lastOrientation = orientation
+        lastFps = fps
 
         val cameraSelector = resolveCameraSelector(lens)
+        // 查询硬件支持的帧率和对应的 AE Range
+        val (actualFps, bestRange) = resolveActualFps(fps, cameraSelector)
+        lastAppliedFps = actualFps
+        DebugLog.d(TAG, "请求帧率: ${fps}fps, 实际帧率: ${actualFps}fps, Range: ${bestRange}")
 
         val targetRotation = try {
             resolveDisplay(context)?.rotation ?: Surface.ROTATION_0
@@ -290,7 +303,7 @@ class CameraController(private val context: Context) {
 
         // Use Case 2: ImageAnalysis → 帧管线（如果提供）
         if (framePipeline != null) {
-            val imageAnalysis = ImageAnalysis.Builder()
+            val analysisBuilder = ImageAnalysis.Builder()
                 .setResolutionSelector(
                     ResolutionSelector.Builder()
                         .setAspectRatioStrategy(
@@ -310,15 +323,88 @@ class CameraController(private val context: Context) {
                 .setTargetRotation(targetRotation)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build()
+
+            // 通过 Camera2Interop 设置 AE 目标帧率范围，让摄像头实际输出高帧率
+            // 关键：使用传感器实际支持的 Range（如 [30,60]）而非单点值（如 [60,60]），
+            // 单点值在部分设备上会被忽略或导致高分辨率下退回 30fps
+            if (actualFps > 30 && bestRange != null) {
+                try {
+                    Camera2Interop.Extender(analysisBuilder)
+                        .setCaptureRequestOption(
+                            android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                            bestRange
+                        )
+                    DebugLog.d(TAG, "已通过 Camera2Interop 请求 ${actualFps}fps 输出, Range=[${bestRange.lower},${bestRange.upper}]")
+                } catch (e: Exception) {
+                    DebugLog.w(TAG, "Camera2Interop 设置帧率失败: ${e.message}")
+                }
+            }
+
+            val imageAnalysis = analysisBuilder.build()
             imageAnalysis.setAnalyzer(analyzerExecutor, framePipeline)
 
             provider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, imageAnalysis)
+            framePipeline.setCameraFps(lastAppliedFps)
         } else {
             provider.bindToLifecycle(lifecycleOwner, cameraSelector, preview)
         }
 
         _currentLens.value = lens
+    }
+
+    /**
+     * 查询摄像头实际支持的帧率和对应的 AE Range
+     *
+     * 从 CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES 中选取最佳匹配：
+     * - AE Range 的 upper 不超过请求值
+     * - 返回完整的 Range 对象（而非单点值），供 Camera2Interop 使用
+     *
+     * 注意：不使用 StreamConfigurationMap.getOutputMinFrameDuration 来限制帧率，
+     * 因为该方法返回的是 YUV 格式的格式级帧持续时间，远低于传感器实际能力，
+     * 会导致所有高帧率选项被错误过滤（实测在支持 4K@60fps 的设备上也返回 30fps）。
+     *
+     * @return Pair(bestFps, bestRange)，bestFps=30 时 bestRange 为 null
+     */
+    private fun resolveActualFps(
+        requestedFps: Int,
+        cameraSelector: CameraSelector,
+    ): Pair<Int, android.util.Range<Int>?> {
+        try {
+            val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val cameraId = Camera2CameraInfo.from(cameraProvider!!.availableCameraInfos
+                .first { cameraSelector.filter(listOf(it)).isNotEmpty() }).cameraId
+            val chars = cameraManager.getCameraCharacteristics(cameraId)
+
+            val fpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                ?: arrayOf()
+
+            // 收集所有 ≥30 的 FPS 值（取每个 range 的 upper），始终更新 UI 可选帧率
+            val aeSupported = fpsRanges.map { it.upper }.filter { it >= 30 }.distinct().sortedDescending()
+            _supportedFps.value = aeSupported.toSet()
+            DebugLog.d(TAG, "摄像头 $cameraId AE 支持的 FPS: $aeSupported, 可用 Range: ${fpsRanges.map { "[${it.lower},${it.upper}]" }}, 请求: ${requestedFps}fps")
+
+            // 请求 ≤30fps 时，无需查询高帧率 Range，直接返回
+            if (requestedFps <= 30) return Pair(requestedFps, null)
+
+            // 选不超过请求值的最佳 FPS
+            val bestFps = aeSupported.firstOrNull { it <= requestedFps }
+                ?: aeSupported.firstOrNull()
+                ?: 30
+
+            if (bestFps <= 30) return Pair(30, null)
+
+            // 找到包含 bestFps 的最佳 Range：优先 upper == bestFps 的，其次 lower 最大的
+            val bestRange = fpsRanges
+                .filter { it.upper == bestFps }
+                .maxByOrNull { it.lower }
+                ?: fpsRanges.firstOrNull { it.upper >= bestFps }
+
+            DebugLog.d(TAG, "实际使用帧率: ${bestFps}fps, AE Range: [${bestRange?.lower},${bestRange?.upper}]")
+            return Pair(bestFps, bestRange)
+        } catch (e: Exception) {
+            DebugLog.w(TAG, "查询摄像头帧率失败，退回 30fps: ${e.message}")
+            return Pair(requestedFps.coerceAtMost(30), null)
+        }
     }
 
     /**
@@ -339,8 +425,35 @@ class CameraController(private val context: Context) {
             framePipeline = pipeline,
             encoderWidth = lastEncoderWidth,
             encoderHeight = lastEncoderHeight,
+            fps = lastFps,
         )
         return lens
+    }
+
+    /**
+     * 使用新的 profile 参数重新绑定摄像头
+     *
+     * 在用户切换分辨率/帧率时调用。使用缓存的 lifecycleOwner 和 previewView，
+     * 只更新 encoderWidth/encoderHeight/fps。
+     *
+     * @return true 表示重新绑定成功，false 表示摄像头尚未绑定过
+     */
+    suspend fun rebindWithProfile(width: Int, height: Int, fps: Int): Boolean {
+        val owner = lastLifecycleOwner ?: return false
+        val pv = lastPreviewView ?: return false
+        val pipeline = lastFramePipeline
+
+        bindPreview(
+            lifecycleOwner = owner,
+            previewView = pv,
+            lens = currentLens.value,
+            orientation = lastOrientation,
+            framePipeline = pipeline,
+            encoderWidth = width,
+            encoderHeight = height,
+            fps = fps,
+        )
+        return true
     }
 
     /**

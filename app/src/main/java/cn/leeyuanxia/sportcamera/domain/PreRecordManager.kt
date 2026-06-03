@@ -131,15 +131,24 @@ class PreRecordManager : FrameConsumer {
     }
 
     override fun feedFrame(yuvData: ByteArray, timestampUs: Long, width: Int, height: Int) {
-        // 首帧：记录相机分辨率
-        if (cameraWidth == 0 && width > 0 && height > 0) {
+        // 检测分辨率变化（用户切换了画质档位），重建编码器
+        val resolutionChanged = (cameraWidth > 0 && width > 0 && height > 0
+            && (width != cameraWidth || height != cameraHeight))
+
+        if (cameraWidth == 0 || resolutionChanged) {
+            if (resolutionChanged) {
+                DebugLog.d(TAG, "分辨率变化: ${cameraWidth}x${cameraHeight} → ${width}x${height}，重建编码器")
+                ringBuffer?.stop()
+                ringBuffer?.release()
+                ringBuffer = null
+                drainStarted = false
+            }
             cameraWidth = width
             cameraHeight = height
-            DebugLog.d(TAG, "首帧: ${width}x${height}, readyToCreate=$readyToCreate, drainStarted=$drainStarted, profile=${currentProfile.width}x${currentProfile.height}")
+            DebugLog.d(TAG, "首帧/分辨率变更: ${width}x${height}, readyToCreate=$readyToCreate, drainStarted=$drainStarted")
         }
 
         // 满足条件时自动创建编码器
-        // 使用用户选择的分辨率档位参数（fps/bitrate），热管理降级时才覆盖
         if (readyToCreate && !drainStarted && cameraWidth > 0) {
             val config = throttleConfig
             createBuffer(

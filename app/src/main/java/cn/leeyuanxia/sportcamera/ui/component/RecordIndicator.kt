@@ -6,6 +6,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -18,15 +19,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import cn.leeyuanxia.sportcamera.domain.AppState
 import cn.leeyuanxia.sportcamera.ui.theme.StatusRecording
 
 /**
- * 中央录制指示器 — 录制时显示红色圆点 + 倒计时
+ * 中央录制指示器 — 红色圆点 + 脉冲光环 + 倒计时
  */
 @Composable
 fun RecordIndicator(
@@ -35,39 +36,96 @@ fun RecordIndicator(
 ) {
     if (appState !is AppState.Recording) return
 
-    // 使用浮点除法显示十进制秒数（如 "2.5/5" 而非 "2/5"）
     val elapsedSec = appState.elapsedMs / 1000.0
-    val targetSec = appState.targetMs / 1000  // 目标值始终是整数秒，无需小数
+    val targetSec = appState.targetMs / 1000
+    val progress = (appState.elapsedMs.toFloat() / appState.targetMs).coerceIn(0f, 1f)
 
-    // 脉冲缩放动画
     val infiniteTransition = rememberInfiniteTransition(label = "recordPulse")
-    val scale by infiniteTransition.animateFloat(
+    val ringScale by infiniteTransition.animateFloat(
         initialValue = 1.0f,
-        targetValue = 1.2f,
+        targetValue = 1.8f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "ringScale",
+    )
+    val ringAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.6f,
+        targetValue = 0.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "ringAlpha",
+    )
+    val dotScale by infiniteTransition.animateFloat(
+        initialValue = 1.0f,
+        targetValue = 1.15f,
         animationSpec = infiniteRepeatable(
             animation = tween(600),
             repeatMode = RepeatMode.Reverse,
         ),
-        label = "pulseScale",
+        label = "dotScale",
     )
 
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        // 红色圆点
+        // 录制图标：脉冲光环 + 红点
         Box(
-            modifier = Modifier
-                .size(20.dp)
-                .scale(scale)
-                .background(StatusRecording, CircleShape),
-        )
-        Spacer(Modifier.height(8.dp))
-        // 倒计时（已用 / 总时长，已用显示一位小数）
+            modifier = Modifier.size(56.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            // 外层脉冲光环
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .scale(ringScale)
+                    .border(2.dp, StatusRecording.copy(alpha = ringAlpha), CircleShape),
+            )
+            // 内层红点
+            Box(
+                modifier = Modifier
+                    .size(18.dp)
+                    .scale(dotScale)
+                    .background(StatusRecording, CircleShape),
+            )
+        }
+
+        Spacer(Modifier.height(16.dp))
+
+        // 倒计时 — 大字醒目
         Text(
-            text = "${"%.1f".format(elapsedSec)} / $targetSec",
+            text = formatTime(elapsedSec, targetSec),
             color = Color.White,
-            style = MaterialTheme.typography.headlineMedium,
+            style = MaterialTheme.typography.displayLarge,
+            fontWeight = FontWeight.Bold,
         )
+
+        Spacer(Modifier.height(4.dp))
+
+        // 进度文字
+        Text(
+            text = "${(progress * 100).toInt()}%",
+            color = Color.White.copy(alpha = 0.4f),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+    }
+}
+
+/**
+ * 格式化倒计时显示
+ * 还剩不足 5 秒时高亮显示
+ */
+private fun formatTime(elapsedSec: Double, targetSec: Long): String {
+    val remaining = targetSec - elapsedSec
+    return if (remaining <= 5) {
+        // 最后 5 秒：显示剩余秒数（一位小数）
+        "%.1f".format(remaining.coerceAtLeast(0.0))
+    } else {
+        // 正常：已用 / 总时长
+        "${"%.1f".format(elapsedSec)} / $targetSec"
     }
 }
