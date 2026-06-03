@@ -61,6 +61,8 @@ fun ControlBar(
     selectedProfile: ResolutionProfile,
     selectedOrientation: RecordOrientation,
     supportedFps: Set<Int> = setOf(30),
+    videoStabilization: Boolean = true,
+    eisSupported: Boolean = false,
     previewVisible: Boolean,
     onStartStandby: () -> Unit,
     onStopStandby: () -> Unit,
@@ -69,6 +71,7 @@ fun ControlBar(
     onDurationChanged: (PreRecordDuration) -> Unit,
     onResolutionChanged: (ResolutionProfile) -> Unit,
     onOrientationChanged: (RecordOrientation) -> Unit,
+    onVideoStabilizationChanged: (Boolean) -> Unit = {},
     onRequestBatteryOptimization: () -> Unit,
     needsBatteryOptimization: Boolean,
     modifier: Modifier = Modifier,
@@ -87,9 +90,12 @@ fun ControlBar(
                 selectedProfile = selectedProfile,
                 selectedOrientation = selectedOrientation,
                 supportedFps = supportedFps,
+                videoStabilization = videoStabilization,
+                eisSupported = eisSupported,
                 onDurationChanged = onDurationChanged,
                 onResolutionChanged = onResolutionChanged,
                 onOrientationChanged = onOrientationChanged,
+                onVideoStabilizationChanged = onVideoStabilizationChanged,
             )
             Spacer(Modifier.height(16.dp))
         }
@@ -160,9 +166,12 @@ private fun SettingsPanel(
     selectedProfile: ResolutionProfile,
     selectedOrientation: RecordOrientation,
     supportedFps: Set<Int> = setOf(30),
+    videoStabilization: Boolean = true,
+    eisSupported: Boolean = false,
     onDurationChanged: (PreRecordDuration) -> Unit,
     onResolutionChanged: (ResolutionProfile) -> Unit,
     onOrientationChanged: (RecordOrientation) -> Unit,
+    onVideoStabilizationChanged: (Boolean) -> Unit = {},
 ) {
     Column(
         modifier = Modifier
@@ -257,6 +266,36 @@ private fun SettingsPanel(
                     onClick = { onOrientationChanged(orientation) },
                 )
             }
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        // ===== 视频防抖 =====
+        SectionLabel("视频防抖")
+        Spacer(Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+        ) {
+            Chip(
+                label = "关闭",
+                isSelected = !videoStabilization,
+                enabled = eisSupported,
+                onClick = { onVideoStabilizationChanged(false) },
+            )
+            Chip(
+                label = "开启",
+                isSelected = videoStabilization,
+                enabled = eisSupported,
+                onClick = { onVideoStabilizationChanged(true) },
+            )
+        }
+        if (!eisSupported) {
+            Text(
+                text = "当前设备不支持电子防抖",
+                color = TextTertiary,
+                style = MaterialTheme.typography.labelSmall,
+            )
         }
     }
 }

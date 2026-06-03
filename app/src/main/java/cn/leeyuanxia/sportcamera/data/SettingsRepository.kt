@@ -3,6 +3,7 @@ package cn.leeyuanxia.sportcamera.data
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -22,6 +23,7 @@ import kotlinx.coroutines.flow.map
  * - 镜头选择
  * - 分辨率档位
  * - 录制方向（横屏/竖屏）
+ * - 视频防抖（EIS）
  */
 class SettingsRepository(private val context: Context) {
 
@@ -32,6 +34,7 @@ class SettingsRepository(private val context: Context) {
         private val KEY_CAMERA_LENS = stringPreferencesKey("camera_lens")
         private val KEY_RESOLUTION = stringPreferencesKey("resolution_profile")
         private val KEY_ORIENTATION = stringPreferencesKey("record_orientation")
+        private val KEY_VIDEO_STABILIZATION = booleanPreferencesKey("video_stabilization")
     }
 
     /** 预录时长（自定义秒数，1~120s） */
@@ -83,6 +86,18 @@ class SettingsRepository(private val context: Context) {
     suspend fun setRecordOrientation(orientation: RecordOrientation) {
         context.dataStore.edit { prefs ->
             prefs[KEY_ORIENTATION] = orientation.name
+        }
+    }
+
+    /** 视频防抖（EIS），默认开启 */
+    val videoStabilization: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[KEY_VIDEO_STABILIZATION] ?: true
+    }
+
+    /** 设置视频防抖 */
+    suspend fun setVideoStabilization(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[KEY_VIDEO_STABILIZATION] = enabled
         }
     }
 }

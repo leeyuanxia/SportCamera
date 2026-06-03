@@ -71,6 +71,8 @@ fun MainScreen(viewModel: CameraViewModel) {
     val supportedFps by viewModel.supportedFps.collectAsState()
     val previewVisible by viewModel.previewVisible.collectAsState()
     val uiVisible by viewModel.uiVisible.collectAsState()
+    val videoStabilization by viewModel.videoStabilization.collectAsState()
+    val eisSupported by viewModel.eisSupported.collectAsState()
 
     val context = LocalContext.current
     val activity = context as? ComponentActivity
@@ -197,6 +199,8 @@ fun MainScreen(viewModel: CameraViewModel) {
                     selectedProfile = resolutionProfile,
                     selectedOrientation = recordOrientation,
                     supportedFps = supportedFps,
+                    videoStabilization = videoStabilization,
+                    eisSupported = eisSupported,
                     previewVisible = previewVisible,
                     onStartStandby = viewModel::startStandby,
                     onStopStandby = viewModel::stopStandby,
@@ -205,6 +209,7 @@ fun MainScreen(viewModel: CameraViewModel) {
                     onDurationChanged = viewModel::setPreRecordDuration,
                     onResolutionChanged = viewModel::setResolutionProfile,
                     onOrientationChanged = viewModel::setRecordOrientation,
+                    onVideoStabilizationChanged = viewModel::setVideoStabilization,
                     onRequestBatteryOptimization = {
                         viewModel.requestBatteryOptimization(context)
                     },

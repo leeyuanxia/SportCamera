@@ -107,6 +107,25 @@ class CameraController(private val context: Context) {
     var isSurfaceMode: Boolean = false
         private set
 
+    // ---- 视频防抖 (EIS) ----
+
+    /** 视频防抖是否开启（由 ViewModel 设置，CameraController 负责应用到硬件） */
+    @Volatile
+    var videoStabilizationEnabled: Boolean = true
+        private set
+
+    /** 当前摄像头是否支持 EIS */
+    private val _eisSupported = MutableStateFlow(false)
+    val eisSupported: StateFlow<Boolean> = _eisSupported.asStateFlow()
+
+    /** 当前 EIS 模式值（CaptureRequest 常量） */
+    private val currentVideoStabilizationMode: Int
+        get() = if (videoStabilizationEnabled) {
+            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+        } else {
+            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+        }
+
     /**
      * 初始化 CameraProvider 并检测可用镜头
      *
@@ -327,11 +346,23 @@ class CameraController(private val context: Context) {
         }
 
         // Use Case 1: Preview → PreviewView
-        val preview = Preview.Builder()
+        val previewBuilder = Preview.Builder()
             .setTargetRotation(targetRotation)
-            .build().also {
-                it.surfaceProvider = previewView.surfaceProvider
-            }
+
+        // 通过 Camera2Interop 设置视频防抖（EIS）
+        try {
+            Camera2Interop.Extender(previewBuilder)
+                .setCaptureRequestOption(
+                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                    currentVideoStabilizationMode
+                )
+        } catch (e: Exception) {
+            DebugLog.w(TAG, "Preview Camera2Interop 设置防抖失败: ${e.message}")
+        }
+
+        val preview = previewBuilder.build().also {
+            it.surfaceProvider = previewView.surfaceProvider
+        }
 
         provider.unbindAll()
 
@@ -361,17 +392,30 @@ class CameraController(private val context: Context) {
             // 通过 Camera2Interop 设置 AE 目标帧率范围，让摄像头实际输出高帧率
             // 关键：使用传感器实际支持的 Range（如 [30,60]）而非单点值（如 [60,60]），
             // 单点值在部分设备上会被忽略或导致高分辨率下退回 30fps
+            // 通过 Camera2Interop 设置 AE 目标帧率范围和视频防抖
+            val extender = Camera2Interop.Extender(analysisBuilder)
+
             if (actualFps > 30 && bestRange != null) {
                 try {
-                    Camera2Interop.Extender(analysisBuilder)
-                        .setCaptureRequestOption(
-                            android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                            bestRange
-                        )
+                    extender.setCaptureRequestOption(
+                        android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                        bestRange
+                    )
                     DebugLog.d(TAG, "已通过 Camera2Interop 请求 ${actualFps}fps 输出, Range=[${bestRange.lower},${bestRange.upper}]")
                 } catch (e: Exception) {
                     DebugLog.w(TAG, "Camera2Interop 设置帧率失败: ${e.message}")
                 }
+            }
+
+            // 视频防抖 (EIS)：通过 Camera2Interop 设置
+            try {
+                extender.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                    currentVideoStabilizationMode
+                )
+                DebugLog.d(TAG, "已设置视频防抖: mode=$currentVideoStabilizationMode")
+            } catch (e: Exception) {
+                DebugLog.w(TAG, "Camera2Interop 设置防抖失败: ${e.message}")
             }
 
             val imageAnalysis = analysisBuilder.build()
@@ -587,6 +631,13 @@ class CameraController(private val context: Context) {
             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
             // 自动曝光
             set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            // 视频防抖 (EIS)
+            val eisMode = if (videoStabilizationEnabled) {
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+            } else {
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+            }
+            set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, eisMode)
         }
         camera2RequestBuilder = requestBuilder
 
@@ -631,6 +682,121 @@ class CameraController(private val context: Context) {
         }
     }
 
+    // ---- 视频防抖 (EIS) 方法 ----
+
+    /**
+     * 检查当前摄像头是否支持 EIS（电子防抖）
+     *
+     * 从 CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES
+     * 读取支持的模式列表，检查是否包含 CONTROL_VIDEO_STABILIZATION_MODE_ON。
+     *
+     * @return true 如果当前摄像头支持 EIS ON 模式
+     */
+    private fun checkEisSupportedForCurrentCamera(): Boolean {
+        return try {
+            val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val cameraId = if (isSurfaceMode && camera2Device != null) {
+                camera2Device!!.id
+            } else if (cameraProvider != null) {
+                resolveCamera2Id(resolveCameraSelector(_currentLens.value))
+            } else {
+                return false
+            }
+
+            val chars = cameraManager.getCameraCharacteristics(cameraId)
+            val modes = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
+                ?: intArrayOf()
+
+            val supported = modes.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+            DebugLog.d(TAG, "EIS 支持检测: cameraId=$cameraId, modes=${modes.toList()}, supported=$supported")
+            supported
+        } catch (e: Exception) {
+            DebugLog.w(TAG, "检测 EIS 支持失败: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * 刷新 EIS 能力检测并更新 StateFlow
+     *
+     * 调用时机：
+     * - 初始化完成后
+     * - 镜头切换后
+     * - 相机绑定后（不同设备 EIS 能力可能不同）
+     */
+    fun refreshEisCapability() {
+        val supported = checkEisSupportedForCurrentCamera()
+        _eisSupported.value = supported
+        DebugLog.d(TAG, "EIS 能力已刷新: supported=$supported")
+    }
+
+    /**
+     * 设置视频防抖模式
+     *
+     * @param enabled 是否开启防抖
+     * @param isRecording 当前是否在录制中（录制中禁止切换）
+     */
+    fun setVideoStabilization(enabled: Boolean, isRecording: Boolean = false) {
+        if (isRecording) {
+            DebugLog.w(TAG, "录制中禁止切换防抖，忽略请求: enabled=$enabled")
+            return
+        }
+        if (enabled && !_eisSupported.value) {
+            DebugLog.w(TAG, "当前设备不支持 EIS，忽略开启请求")
+            return
+        }
+
+        videoStabilizationEnabled = enabled
+        val mode = currentVideoStabilizationMode
+        DebugLog.d(TAG, "视频防抖已${if (enabled) "开启" else "关闭"}, mode=$mode")
+
+        // Surface 模式下需立重建 CaptureRequest 使变更生效
+        if (isSurfaceMode) {
+            rebuildSurfaceCaptureRequest(videoStabilizationMode = mode)
+        }
+        // CameraX 模式下在下次 bindPreview() 时生效
+    }
+
+    /**
+     * 重建 Surface 模式的 CaptureRequest
+     *
+     * 在热管理更新 FPS 或用户切换 EIS 时调用。
+     * 确保所有目标 Surface 和参数被重新添加，EIS 模式不会因重建而丢失。
+     *
+     * @param fpsRange 新的 FPS Range，为 null 时保留当前值
+     * @param videoStabilizationMode EIS 模式，默认使用 currentVideoStabilizationMode
+     */
+    private fun rebuildSurfaceCaptureRequest(
+        fpsRange: android.util.Range<Int>? = null,
+        videoStabilizationMode: Int = currentVideoStabilizationMode,
+    ) {
+        val session = camera2Session ?: return
+        val device = camera2Device ?: return
+        val handler = camera2Handler ?: return
+
+        try {
+            val cameraId = device.id
+            val range = fpsRange ?: run {
+                val fps = if (lastAppliedFps > 0) lastAppliedFps else 30
+                resolveSurfaceFpsRange(cameraId, fps)
+            }
+
+            val requestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                camera2Surfaces.forEach { surface -> addTarget(surface) }
+                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
+                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, videoStabilizationMode)
+            }
+            camera2RequestBuilder = requestBuilder
+            session.setRepeatingRequest(requestBuilder.build(), null, handler)
+            lastAppliedFps = range.upper
+            DebugLog.d(TAG, "Surface CaptureRequest 已重建: fpsRange=${range}, eisMode=$videoStabilizationMode")
+        } catch (e: Exception) {
+            DebugLog.w(TAG, "重建 Surface CaptureRequest 失败: ${e.message}")
+        }
+    }
+
     /**
      * 更新 Camera2 会话的 AE FPS Range（热管理降频时调用）
      *
@@ -640,27 +806,9 @@ class CameraController(private val context: Context) {
      * @param fps 目标帧率
      */
     fun updateSurfaceFps(fps: Int) {
-        val session = camera2Session ?: return
-        val device = camera2Device ?: return
-        val handler = camera2Handler ?: return
-
-        try {
-            val cameraId = camera2Device?.id ?: return
-            val range = resolveSurfaceFpsRange(cameraId, fps)
-            val requestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                // 重新添加所有目标 Surface（从缓存中获取）
-                camera2Surfaces.forEach { surface -> addTarget(surface) }
-                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
-                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
-                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-            }
-            camera2RequestBuilder = requestBuilder
-            session.setRepeatingRequest(requestBuilder.build(), null, handler)
-            lastAppliedFps = range.upper
-            DebugLog.d(TAG, "Camera2 FPS 已更新: 请求=${fps}fps, 实际Range=${range}")
-        } catch (e: Exception) {
-            DebugLog.w(TAG, "Camera2 更新 FPS 失败: ${e.message}")
-        }
+        val cameraId = camera2Device?.id ?: return
+        val range = resolveSurfaceFpsRange(cameraId, fps)
+        rebuildSurfaceCaptureRequest(fpsRange = range)
     }
 
     // ---- Camera2 内部辅助方法 ----

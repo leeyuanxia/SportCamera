@@ -12,6 +12,7 @@ import androidx.lifecycle.viewModelScope
 import cn.leeyuanxia.sportcamera.di.AppContainer
 import cn.leeyuanxia.sportcamera.domain.AppState
 import cn.leeyuanxia.sportcamera.domain.VoiceTriggerRecorder
+import cn.leeyuanxia.sportcamera.domain.isRecording
 import cn.leeyuanxia.sportcamera.domain.model.CameraLens
 import cn.leeyuanxia.sportcamera.domain.model.PreRecordDuration
 import cn.leeyuanxia.sportcamera.domain.model.RecordOrientation
@@ -92,6 +93,13 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     /** 摄像头硬件支持的帧率（从 CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES 查询） */
     val supportedFps: StateFlow<Set<Int>> = cameraController.supportedFps
 
+    /** 视频防抖 (EIS) — 用户设置，持久化到 DataStore */
+    val videoStabilization: StateFlow<Boolean> =
+        settingsRepo.videoStabilization.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+
+    /** 当前摄像头是否支持 EIS（硬件能力检测结果） */
+    val eisSupported: StateFlow<Boolean> = cameraController.eisSupported
+
     /** 预览画面是否可见 — 待机时隐藏，录制时显示，支持 30s 窥视 */
     private val _previewVisible = MutableStateFlow(true)
     val previewVisible: StateFlow<Boolean> = _previewVisible.asStateFlow()
@@ -161,6 +169,14 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 delay(30_000)
             }
         }
+        // 视频防抖设置变化 → 同步到硬件
+        viewModelScope.launch {
+            videoStabilization.collect { enabled ->
+                cameraController.setVideoStabilization(
+                    enabled, isRecording = appState.value.isRecording
+                )
+            }
+        }
     }
 
     // ---- UI 调用的方法 ----
@@ -197,6 +213,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             encoderHeight = profile.height,
             fps = profile.fps,
         )
+        cameraController.refreshEisCapability()
     }
 
     fun startStandby() {
@@ -204,6 +221,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         cameraLifecycleOwner.enterStandby()
         viewModelScope.launch {
             voiceTriggerRecorder.enterStandby()
+            // Surface 模式可能已激活（4K@60fps），刷新 EIS 能力
+            cameraController.refreshEisCapability()
         }
     }
 
@@ -283,6 +302,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             // 实际切换摄像头（重新绑定 CameraX）
             val switched = cameraController.switchLens(lens)
             if (switched != null) {
+                cameraController.refreshEisCapability()
                 DebugLog.d(TAG, "镜头已切换: $switched")
             } else {
                 DebugLog.w(TAG, "镜头切换失败 — 相机尚未绑定")
@@ -305,6 +325,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun setRecordOrientation(orientation: RecordOrientation) {
         viewModelScope.launch {
             settingsRepo.setRecordOrientation(orientation)
+        }
+    }
+
+    fun setVideoStabilization(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsRepo.setVideoStabilization(enabled)
         }
     }
 
