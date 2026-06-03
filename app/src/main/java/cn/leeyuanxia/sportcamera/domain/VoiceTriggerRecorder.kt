@@ -10,6 +10,7 @@ import cn.leeyuanxia.sportcamera.domain.model.ResolutionProfile
 import cn.leeyuanxia.sportcamera.hardware.audio.AudioRecorder
 import cn.leeyuanxia.sportcamera.hardware.audio.KwsManager
 import cn.leeyuanxia.sportcamera.hardware.audio.RingBufferAudioRecorder
+import cn.leeyuanxia.sportcamera.hardware.camera.CameraController
 import cn.leeyuanxia.sportcamera.hardware.camera.CameraFramePipeline
 import cn.leeyuanxia.sportcamera.hardware.camera.RingBufferRecorder.Companion.isConfigFrame
 import cn.leeyuanxia.sportcamera.hardware.storage.VideoStorageManager
@@ -49,9 +50,19 @@ class VoiceTriggerRecorder(
     private val framePipeline: CameraFramePipeline,
     private val powerStateManager: PowerStateManager,
     private val thermalThrottler: ThermalThrottler,
+    private val cameraController: CameraController,
 ) {
     companion object {
         private const val TAG = "VoiceTrigger"
+    }
+
+    /** PreviewView 引用，Surface 模式下需要传给 CameraController 绑定 Camera2 */
+    @Volatile
+    private var previewView: androidx.camera.view.PreviewView? = null
+
+    /** 设置 PreviewView 引用（由 CameraViewModel.bindCamera() 时调用） */
+    fun setPreviewView(pv: androidx.camera.view.PreviewView?) {
+        previewView = pv
     }
 
     private val _appState = MutableStateFlow<AppState>(AppState.Idle)
@@ -97,6 +108,11 @@ class VoiceTriggerRecorder(
      * 进入待机模式
      *
      * 启动前台服务 + WakeLock + 热管理 + KWS 监听 + 预录环形缓冲编码。
+     *
+     * 4K@60fps Surface 模式：
+     * - 编码器使用 Surface 输入（相机零拷贝直出）
+     * - 使用 Camera2 API 替代 CameraX（ISP 带宽限制）
+     * - 帧数据不经过 CameraFramePipeline
      */
     fun enterStandby() {
         kwsJob?.cancel()
@@ -109,27 +125,65 @@ class VoiceTriggerRecorder(
         // 获取 WakeLock：保持 CPU 运行，允许屏幕关闭（最省电的 WakeLock 类型）
         powerStateManager.acquireStandbyWakeLock()
 
-        // 连接帧管线，首帧到达后 feedFrame 中自动创建编码器
-        preRecordManager.markReadyToCreate()
-        framePipeline.setEncoder(preRecordManager)
+        // 判断是否需要 Surface 模式（4K@60fps）
+        val needsSurfaceMode = currentProfile.width >= 3840 && currentProfile.fps > 30
 
-        // 待机帧率节流：预录使用 30fps，与录制帧率一致，保证合成视频流畅
-        val throttleConfig = thermalThrottler.config.value
-        framePipeline.setTargetFps(throttleConfig.preRecordFps)
+        if (needsSurfaceMode) {
+            // ---- Surface 模式（4K@60fps） ----
+            // 编码器使用 Surface 输入，相机通过 Camera2 API 直接输出到编码器 Surface
+            // CameraFramePipeline 不参与编码数据流
+            preRecordManager.encoderSurfaceReady = { surface ->
+                // 编码器 Surface 创建完成，通知 CameraController 切换到 Camera2 模式
+                scope.launch {
+                    val pv = previewView
+                    if (pv != null) {
+                        try {
+                            cameraController.bindPreviewWithSurface(
+                                previewView = pv,
+                                lens = cameraController.currentLens.value,
+                                fps = thermalThrottler.config.value.preRecordFps,
+                                encoderSurface = surface,
+                            )
+                            framePipeline.setSurfaceMode(true)
+                            DebugLog.d(TAG, "Camera2 Surface 模式绑定成功")
+                        } catch (e: Exception) {
+                            DebugLog.e(TAG, "Camera2 Surface 模式绑定失败: ${e.message}", e)
+                            // 降级：Surface 模式失败，回退到 ByteBuffer 模式
+                            framePipeline.setSurfaceMode(false)
+                            framePipeline.setEncoder(preRecordManager)
+                            framePipeline.setTargetFps(thermalThrottler.config.value.preRecordFps)
+                        }
+                    } else {
+                        DebugLog.e(TAG, "PreviewView 为 null，无法绑定 Camera2 Surface 模式")
+                    }
+                }
+            }
+            // 关键：Surface 模式下帧不经过 pipeline，无法通过 feedFrame 触发编码器创建
+            // 必须主动创建编码器，获取 encoder Surface 后才能绑定 Camera2
+            preRecordManager.createSurfaceEncoder()
+            framePipeline.setSurfaceMode(true)
+            DebugLog.d(TAG, "预录管线已连接（Surface 模式），编码器主动创建完成")
+        } else {
+            // ---- ByteBuffer 模式（非 4K@60fps） ----
+            // 现有逻辑完全不变
+            framePipeline.setSurfaceMode(false)
+            preRecordManager.markReadyToCreate()
+            framePipeline.setEncoder(preRecordManager)
 
-        DebugLog.d(TAG, "预录管线已连接，等待首帧自动创建编码器 (fps=${throttleConfig.preRecordFps})")
+            // 待机帧率节流：预录使用 30fps，与录制帧率一致，保证合成视频流畅
+            val throttleConfig = thermalThrottler.config.value
+            framePipeline.setTargetFps(throttleConfig.preRecordFps)
 
-        // 启动 drain 循环
+            DebugLog.d(TAG, "预录管线已连接，等待首帧自动创建编码器 (fps=${throttleConfig.preRecordFps})")
+        }
+
+        // 启动 drain 循环（Surface 和 ByteBuffer 模式共用）
         preRecordDrainJob = scope.launch {
             preRecordManager.drainLoop()
             DebugLog.d(TAG, "预录 drain 协程结束")
         }
 
         // 启动 KWS + 音频预录
-        // 关键顺序：先在协程中完成 KWS 初始化（加载模型+创建stream），
-        // 再启动 pre-audio 的 captureAndEncode。
-        // 避免两个 AudioRecord 竞争麦克风（Android 只允许一个同时访问 MIC），
-        // 所以 KWS 使用外部 PCM 模式，由 pre-audio 提供降采样后的数据。
         kwsManager.setExternalPcmMode(true)
         kwsJob = scope.launch {
             // 步骤 1: 初始化 KWS 模型（加载 onnx 文件，可能耗时几百毫秒）
@@ -161,8 +215,18 @@ class VoiceTriggerRecorder(
             thermalThrottler.config.collect { config ->
                 DebugLog.d(TAG, "热管理配置更新: fps=${config.preRecordFps}, bitrate=${config.preRecordBitrateBps}, kwsInterval=${config.kwsReadIntervalMs}ms")
                 preRecordManager.updateThrottleConfig(config)
-                framePipeline.setTargetFps(config.preRecordFps)
+                // ByteBuffer 模式下通过 pipeline 节流
+                if (!cameraController.isSurfaceMode) {
+                    framePipeline.setTargetFps(config.preRecordFps)
+                }
                 kwsManager.updateReadInterval(config.kwsReadIntervalMs)
+            }
+        }
+
+        // Surface 模式热管理：帧率变更通过 AE FPS Range 控制
+        thermalThrottler.onSurfaceFpsChanged = { fps ->
+            if (cameraController.isSurfaceMode) {
+                cameraController.updateSurfaceFps(fps)
             }
         }
     }
@@ -297,6 +361,11 @@ class VoiceTriggerRecorder(
         preAudioRecorder?.release()
         preAudioRecorder = null
         kwsManager.stopListening()
+        // 清理 Surface 模式回调
+        thermalThrottler.onSurfaceFpsChanged = null
+        framePipeline.setSurfaceMode(false)
+        // 停止 Camera2 会话（如果在 Surface 模式）
+        cameraController.stopCamera2Session()
         preRecordManager.stop()
         framePipeline.setEncoder(null)
         powerStateManager.releaseWakeLock()

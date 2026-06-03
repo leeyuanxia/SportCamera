@@ -55,6 +55,15 @@ class ThermalThrottler(private val context: Context) {
     val thermalLevel: StateFlow<String> = _thermalLevel.asStateFlow()
 
     /**
+     * Surface 模式下帧率变更回调 — 通知 CameraController 更新 AE FPS Range
+     *
+     * Surface 模式无法通过 skipPattern 跳帧，帧率控制只能通过
+     * Camera2 的 CONTROL_AE_TARGET_FPS_RANGE 实现。
+     * 此回调在 recalculateConfig() 中触发。
+     */
+    var onSurfaceFpsChanged: ((fps: Int) -> Unit)? = null
+
+    /**
      * 设置用户的 profile 参数
      *
      * 当用户切换分辨率/帧率档位时调用，热管理配置会基于新参数重新计算。
@@ -113,6 +122,8 @@ class ThermalThrottler(private val context: Context) {
                 "${fps}fps / ${bitrateBps / 1000}kbps (profile: ${profileFps}fps / ${profileBitrateBps / 1000}kbps)")
         _config.value = newConfig
         _thermalLevel.value = levelName
+        // Surface 模式下通知 CameraController 更新 AE FPS Range
+        onSurfaceFpsChanged?.invoke(fps)
     }
 
     private fun thermalStatusToString(status: Int): String = when (status) {

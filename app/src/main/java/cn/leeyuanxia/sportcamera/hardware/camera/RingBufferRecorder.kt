@@ -3,6 +3,7 @@ package cn.leeyuanxia.sportcamera.hardware.camera
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.view.Surface
 import cn.leeyuanxia.sportcamera.util.DebugLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -12,19 +13,17 @@ import java.util.concurrent.ConcurrentLinkedDeque
 /**
  * 环形缓冲区录制器 — 预录的核心组件
  *
- * 使用 MediaCodec 编码器（ByteBuffer 输入）将 YUV 帧编码为 H.264 NAL，
- * 编码后的帧写入内存环形缓冲区（不写磁盘 → 省电）。
+ * 支持两种输入模式：
+ * 1. ByteBuffer 模式（默认）：ImageAnalysis → YUV → NV12 → feedFrame() → 编码器
+ * 2. Surface 模式（4K@60fps）：Camera2 → encoder.inputSurface → 编码器（零拷贝）
+ *
+ * 使用 MediaCodec 编码器将帧编码为 H.264 NAL，编码后的帧写入内存环形缓冲区（不写磁盘 → 省电）。
  * 唤醒时可 dump 所有缓冲帧用于合成视频。
  *
  * 省电设计：
  * - 待机模式使用较低码率（3Mbps）High Profile，帧率与录制一致（30fps）
  * - 环形缓冲仅在内存中，无 Flash IO
  * - 丢弃策略：超过容量时从头部丢弃到关键帧边界
- *
- * 数据流：
- * ImageAnalysis → YUV_420_888 → NV12 ByteArray → feedFrame()
- *   → dequeueInputBuffer() → queueInputBuffer() → MediaCodec 编码
- *   → drainEncoder() 读取编码帧 → 环形缓冲区
  */
 class RingBufferRecorder(
     private val maxDurationSec: Int = 30,
@@ -82,6 +81,23 @@ class RingBufferRecorder(
      */
     @Volatile
     private var encoder: MediaCodec? = null
+
+    /**
+     * 编码器输入 Surface（Surface 模式下使用）
+     *
+     * Surface 模式下，相机通过 Camera2 API 直接将画面输出到此 Surface，
+     * 编码器消费 Surface 上的帧进行编码，无需 feedFrame() 调用。
+     *
+     * 跨线程安全：
+     * - prepareWithSurface() 在 FrameAnalyzer 线程创建
+     * - stop() 可能从任意线程释放
+     */
+    @Volatile
+    private var inputSurface: Surface? = null
+
+    /** 是否使用 Surface 输入模式（4K@60fps 必须使用） */
+    val useSurfaceInput: Boolean
+        get() = width >= 3840 && fps > 30
 
     /** 编码器输出格式中的 CSD-0（SPS），从 INFO_OUTPUT_FORMAT_CHANGED 提取 */
     @Volatile
@@ -141,6 +157,59 @@ class RingBufferRecorder(
             configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         }
         isPrepared = true
+    }
+
+    /**
+     * 准备编码器（Surface 输入模式）— 4K@60fps 必须使用
+     *
+     * 与 ByteBuffer 模式的区别：
+     * - KEY_COLOR_FORMAT 使用 COLOR_FormatSurface（而非 COLOR_FormatYUV420Flexible）
+     * - 通过 createInputSurface() 获取输入 Surface，相机直接输出到此 Surface
+     * - 不需要 feedFrame()，帧数据由相机硬件零拷贝写入
+     * - drainEncoder() 逻辑完全不变
+     *
+     * 重要：Android 6.0+ 要求 createInputSurface() 在 configure() 之后、start() 之前调用
+     * （参考：https://developer.android.com/reference/android/media/MediaCodec#createInputSurface()）
+     *
+     * @return 编码器输入 Surface，需传给 Camera2 API 作为输出目标
+     */
+    fun prepareWithSurface(): Surface {
+        val mbPerFrame = (width / 16) * (height / 16)
+        val mbPerSec = mbPerFrame * fps
+        val avcLevel = when {
+            mbPerSec > 1_000_000 -> MediaCodecInfo.CodecProfileLevel.AVCLevel52
+            else -> MediaCodecInfo.CodecProfileLevel.AVCLevel4
+        }
+
+        val format = MediaFormat.createVideoFormat(
+            MediaFormat.MIMETYPE_VIDEO_AVC, width, height
+        ).apply {
+            setInteger(MediaFormat.KEY_BIT_RATE, bitrateBps)
+            setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+            setInteger(
+                MediaFormat.KEY_COLOR_FORMAT,
+                MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
+            )
+            setInteger(
+                MediaFormat.KEY_PROFILE,
+                MediaCodecInfo.CodecProfileLevel.AVCProfileHigh
+            )
+            setInteger(MediaFormat.KEY_LEVEL, avcLevel)
+        }
+
+        val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        // 1. 先 configure — 进入 Configured 状态
+        codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        // 2. 再 createInputSurface — 必须在 Configured 状态下调用
+        val surface = codec.createInputSurface()
+
+        this.encoder = codec
+        this.inputSurface = surface
+        isPrepared = true
+
+        DebugLog.d(TAG, "Surface 模式编码器已准备: ${width}x${height} @${fps}fps, ${bitrateBps/1000}kbps")
+        return surface
     }
 
     /**
@@ -400,6 +469,9 @@ class RingBufferRecorder(
     /** 停止编码器 */
     fun stop() {
         isRunning = false
+        // Surface 模式：释放 inputSurface 触发 EOS，drainEncoder 检测到后退出
+        inputSurface?.release()
+        inputSurface = null
         try {
             encoder?.stop()
         } catch (_: Exception) {
@@ -416,5 +488,6 @@ class RingBufferRecorder(
         clear()
         csd0Data = null
         csd1Data = null
+        inputSurface = null
     }
 }

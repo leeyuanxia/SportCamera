@@ -64,6 +64,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         framePipeline = framePipeline,
         powerStateManager = container.powerStateManager,
         thermalThrottler = container.thermalThrottler,
+        cameraController = cameraController,
     )
 
     @Volatile
@@ -184,6 +185,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     ) {
         val profile = resolutionProfile.value
         framePipeline.setTargetSize(profile.width, profile.height)
+        // 传递 PreviewView 引用给 VoiceTriggerRecorder（Surface 模式需要）
+        voiceTriggerRecorder.setPreviewView(previewView)
         // 用 CameraLifecycleOwner 包装 Activity 生命周期
         // 待机模式下拦截 Activity.onStop()，锁屏后相机持续采集
         cameraLifecycleOwner.setWrappedOwner(lifecycleOwner)

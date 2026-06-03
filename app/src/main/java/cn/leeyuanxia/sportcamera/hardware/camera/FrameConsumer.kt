@@ -49,7 +49,7 @@ object YuvConverter {
             }
         }
 
-        interleaveUv(image.planes[1], image.planes[2], width, height, nv12, 0)
+        interleaveUv(image.planes[1], image.planes[2], width, height, nv12, width * height)
         return nv12
     }
 

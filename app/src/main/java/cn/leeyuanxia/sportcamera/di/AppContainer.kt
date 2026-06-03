@@ -55,5 +55,6 @@ class AppContainer private constructor(context: Context) {
         framePipeline = framePipeline,
         powerStateManager = powerStateManager,
         thermalThrottler = thermalThrottler,
+        cameraController = cameraController,
     )
 }

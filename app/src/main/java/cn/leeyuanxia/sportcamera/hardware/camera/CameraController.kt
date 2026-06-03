@@ -1,11 +1,17 @@
 package cn.leeyuanxia.sportcamera.hardware.camera
 
 import android.content.Context
+import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
+import android.os.Handler
+import android.os.HandlerThread
 import android.util.Size
 import android.view.Display
 import android.view.Surface
+import android.view.TextureView
 import androidx.annotation.OptIn
 import cn.leeyuanxia.sportcamera.util.DebugLog
 import androidx.camera.camera2.interop.Camera2CameraInfo
@@ -27,8 +33,11 @@ import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * CameraX 摄像头控制器
@@ -72,6 +81,31 @@ class CameraController(private val context: Context) {
     private var lastOrientation: RecordOrientation = RecordOrientation.LANDSCAPE
     private var lastFps: Int = 30
     private var lastAppliedFps: Int = 30
+
+    // ---- Camera2 Surface 模式（4K@60fps 使用） ----
+
+    /** Camera2 设备（Surface 模式下使用，替代 CameraX） */
+    private var camera2Device: CameraDevice? = null
+
+    /** Camera2 捕获会话 */
+    private var camera2Session: CameraCaptureSession? = null
+
+    /** Camera2 捕获请求构建器（用于热管理更新 FPS Range） */
+    private var camera2RequestBuilder: CaptureRequest.Builder? = null
+
+    /** Camera2 会话的输出 Surface 列表（用于重建请求时重新添加 target） */
+    private var camera2Surfaces: List<Surface> = emptyList()
+
+    /** Camera2 专用 HandlerThread */
+    private var camera2Thread: HandlerThread? = null
+
+    /** Camera2 专用 Handler */
+    private var camera2Handler: Handler? = null
+
+    /** 当前是否处于 Camera2 Surface 模式 */
+    @Volatile
+    var isSurfaceMode: Boolean = false
+        private set
 
     /**
      * 初始化 CameraProvider 并检测可用镜头
@@ -410,9 +444,17 @@ class CameraController(private val context: Context) {
     /**
      * 切换镜头 — 使用上次绑定的参数重新绑定
      *
+     * Surface 模式下需要重建 Camera2 会话（不同镜头需要不同的 cameraId）。
+     *
      * @return 切换后的镜头，null 表示无法切换（没有上次的绑定参数）
      */
     suspend fun switchLens(lens: CameraLens): CameraLens? {
+        // Surface 模式下无法简单切换（需要 encoder Surface），记录日志即可
+        // 实际切换在退出再进入 Surface 模式时完成
+        if (isSurfaceMode) {
+            DebugLog.w(TAG, "Surface 模式下暂不支持镜头切换")
+            return null
+        }
         val owner = lastLifecycleOwner ?: return null
         val pv = lastPreviewView ?: return null
         val pipeline = lastFramePipeline
@@ -439,6 +481,11 @@ class CameraController(private val context: Context) {
      * @return true 表示重新绑定成功，false 表示摄像头尚未绑定过
      */
     suspend fun rebindWithProfile(width: Int, height: Int, fps: Int): Boolean {
+        // Surface 模式下不重新绑定 CameraX，帧率通过 updateSurfaceFps() 管理
+        if (isSurfaceMode) {
+            DebugLog.d(TAG, "Surface 模式下跳过 rebindWithProfile，改用 updateSurfaceFps")
+            return true
+        }
         val owner = lastLifecycleOwner ?: return false
         val pv = lastPreviewView ?: return false
         val pipeline = lastFramePipeline
@@ -454,6 +501,296 @@ class CameraController(private val context: Context) {
             fps = fps,
         )
         return true
+    }
+
+    // ==================== Camera2 Surface 模式（4K@60fps） ====================
+
+    /**
+     * 使用 Camera2 API 绑定预览 + 编码器 Surface（4K@60fps 专用）
+     *
+     * CameraX ImageAnalysis 在 4K 分辨率下受 ISP YUV 输出带宽限制，无法达到 60fps。
+     * 此方法绕过 CameraX，直接使用 Camera2 API 创建 CaptureSession，
+     * 将相机输出同时发送到：
+     * - PreviewView 的 Surface（预览显示）
+     * - 编码器的 InputSurface（零拷贝硬件编码）
+     *
+     * 流程：
+     * 1. unbindAll() 释放 CameraX（CameraX 和 Camera2 不能共享同一相机）
+     * 2. 启动 Camera2 HandlerThread
+     * 3. 获取 PreviewView 内部 TextureView 的 Surface
+     * 4. openCamera() → createCaptureSession() → setRepeatingRequest()
+     *
+     * @param previewView  PreviewView（必须使用 COMPATIBLE 模式，内部为 TextureView）
+     * @param lens         目标镜头
+     * @param fps          目标帧率
+     * @param encoderSurface 编码器 InputSurface（从 RingBufferRecorder.prepareWithSurface() 获取）
+     */
+    @OptIn(ExperimentalCamera2Interop::class)
+    suspend fun bindPreviewWithSurface(
+        previewView: PreviewView,
+        lens: CameraLens = _currentLens.value,
+        fps: Int = 60,
+        encoderSurface: Surface,
+    ) {
+        val provider = cameraProvider
+            ?: ProcessCameraProvider.getInstance(context).await().also {
+                cameraProvider = it
+            }
+
+        // 记住绑定参数
+        lastPreviewView = previewView
+        lastFps = fps
+
+        // 1. 释放 CameraX（CameraX 和 Camera2 不能同时持有同一相机）
+        provider.unbindAll()
+
+        // 2. 启动 Camera2 专用 HandlerThread
+        stopCamera2Session() // 清理可能存在的旧会话
+        val thread = HandlerThread("Camera2Session").apply { start() }
+        val handler = Handler(thread.looper)
+        camera2Thread = thread
+        camera2Handler = handler
+
+        // 3. 获取 cameraId（复用 Camera2CameraInfo 逻辑）
+        val cameraSelector = resolveCameraSelector(lens)
+        val cameraId = resolveCamera2Id(cameraSelector)
+        val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+
+        // 4. 获取 PreviewView 内部的 TextureView Surface
+        // COMPATIBLE 模式下 PreviewView 的第一个子 View 是 TextureView
+        val previewSurface = getPreviewViewSurface(previewView)
+            ?: throw IllegalStateException("无法获取 PreviewView 的 Surface，请确保使用 COMPATIBLE 模式且 View 已布局")
+
+        // 5. 解析最佳 FPS Range
+        // Surface 模式下必须强制使用精确帧率范围 [fps, fps]，否则 AE 会在范围内选较低值
+        val actualRange = resolveSurfaceFpsRange(cameraId, fps)
+        lastAppliedFps = actualRange.upper
+
+        DebugLog.d(TAG, "Camera2 Surface 模式: cameraId=$cameraId, 请求fps=$fps, 实际Range=${actualRange}, 镜头=${lens.name}")
+
+        // 6. 打开 Camera2 设备
+        val device = openCamera2Device(cameraManager, cameraId, handler)
+        camera2Device = device
+
+        // 7. 创建 CaptureSession（预览 + 编码器双 Surface 输出）
+        val surfaces = listOf(previewSurface, encoderSurface)
+        camera2Surfaces = surfaces
+        val session = createCaptureSession(device, surfaces, handler)
+        camera2Session = session
+
+        // 8. 构建 CaptureRequest 并设置 FPS Range
+        val requestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+            addTarget(previewSurface)
+            addTarget(encoderSurface)
+            set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, actualRange)
+            // 自动对焦：连续视频模式
+            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+            // 自动曝光
+            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+        }
+        camera2RequestBuilder = requestBuilder
+
+        session.setRepeatingRequest(requestBuilder.build(), null, handler)
+        isSurfaceMode = true
+        _currentLens.value = lens
+
+        DebugLog.d(TAG, "Camera2 Surface 模式绑定完成: ${previewSurface}? + encoderSurface, fps=${actualRange}")
+    }
+
+    /**
+     * 停止 Camera2 会话并释放资源
+     *
+     * 调用时机：
+     * - 退出 4K@60fps 待机模式时
+     * - 切换回 CameraX 模式前
+     * - release() 时
+     */
+    fun stopCamera2Session() {
+        try {
+            camera2Session?.stopRepeating()
+        } catch (_: Exception) {}
+        try {
+            camera2Session?.close()
+        } catch (_: Exception) {}
+        camera2Session = null
+        camera2RequestBuilder = null
+        camera2Surfaces = emptyList()
+
+        try {
+            camera2Device?.close()
+        } catch (_: Exception) {}
+        camera2Device = null
+
+        camera2Handler = null
+        camera2Thread?.quitSafely()
+        camera2Thread = null
+
+        if (isSurfaceMode) {
+            isSurfaceMode = false
+            DebugLog.d(TAG, "Camera2 Surface 会话已停止")
+        }
+    }
+
+    /**
+     * 更新 Camera2 会话的 AE FPS Range（热管理降频时调用）
+     *
+     * Surface 模式下无法通过 skipPattern 跳帧，
+     * 只能通过修改 AE FPS Range 来控制帧率。
+     *
+     * @param fps 目标帧率
+     */
+    fun updateSurfaceFps(fps: Int) {
+        val session = camera2Session ?: return
+        val device = camera2Device ?: return
+        val handler = camera2Handler ?: return
+
+        try {
+            val cameraId = camera2Device?.id ?: return
+            val range = resolveSurfaceFpsRange(cameraId, fps)
+            val requestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                // 重新添加所有目标 Surface（从缓存中获取）
+                camera2Surfaces.forEach { surface -> addTarget(surface) }
+                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
+                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            }
+            camera2RequestBuilder = requestBuilder
+            session.setRepeatingRequest(requestBuilder.build(), null, handler)
+            lastAppliedFps = range.upper
+            DebugLog.d(TAG, "Camera2 FPS 已更新: 请求=${fps}fps, 实际Range=${range}")
+        } catch (e: Exception) {
+            DebugLog.w(TAG, "Camera2 更新 FPS 失败: ${e.message}")
+        }
+    }
+
+    // ---- Camera2 内部辅助方法 ----
+
+    /**
+     * 为 Camera2 Surface 模式解析最佳 FPS Range
+     *
+     * 策略（按优先级）：
+     * 1. 精确匹配 [fps, fps] — 强制相机恒定输出目标帧率
+     * 2. 包含 fps 的最窄范围 — 尽量减少 AE 波动
+     * 3. upper >= fps 的任意范围 — 兜底
+     * 4. 最终兜底：构造 [fps, fps]（部分设备即使不在列表中也能生效）
+     */
+    private fun resolveSurfaceFpsRange(cameraId: String, fps: Int): android.util.Range<Int> {
+        val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val chars = cameraManager.getCameraCharacteristics(cameraId)
+        val fpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+            ?: emptyArray()
+
+        DebugLog.d(TAG, "Surface FPS 解析: 可用范围=${fpsRanges.map { "[${it.lower},${it.upper}]" }}, 请求=$fps")
+
+        // 1. 精确匹配 [fps, fps]
+        val exactRange = fpsRanges.firstOrNull { it.lower == fps && it.upper == fps }
+        if (exactRange != null) {
+            DebugLog.d(TAG, "Surface FPS: 精确匹配 [${exactRange.lower},${exactRange.upper}]")
+            return exactRange
+        }
+
+        // 2. 包含 fps 的最窄范围（lower 越大越窄 → AE 波动越小）
+        val narrowRange = fpsRanges
+            .filter { it.lower <= fps && it.upper >= fps }
+            .maxByOrNull { it.lower }
+        if (narrowRange != null) {
+            DebugLog.d(TAG, "Surface FPS: 最窄包含范围 [${narrowRange.lower},${narrowRange.upper}]")
+            return narrowRange
+        }
+
+        // 3. upper >= fps 的任意范围
+        val anyRange = fpsRanges.firstOrNull { it.upper >= fps }
+        if (anyRange != null) {
+            DebugLog.d(TAG, "Surface FPS: 兜底范围 [${anyRange.lower},${anyRange.upper}]")
+            return anyRange
+        }
+
+        // 4. 构造 [fps, fps]（部分设备即使不在支持列表中也能接受）
+        DebugLog.w(TAG, "Surface FPS: 无匹配范围，使用构造值 [$fps,$fps]")
+        return android.util.Range(fps, fps)
+    }
+
+    /**
+     * 从 CameraSelector 解析 Camera2 cameraId
+     */
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun resolveCamera2Id(cameraSelector: CameraSelector): String {
+        val provider = cameraProvider ?: throw IllegalStateException("CameraProvider 未初始化")
+        val cameraInfo = provider.availableCameraInfos
+            .first { cameraSelector.filter(listOf(it)).isNotEmpty() }
+        return Camera2CameraInfo.from(cameraInfo).cameraId
+    }
+
+    /**
+     * 获取 PreviewView 内部 TextureView 的 Surface
+     *
+     * PreviewView COMPATIBLE 模式内部使用 TextureView，
+     * 通过 getChildAt(0) 获取并从中提取 Surface。
+     */
+    private fun getPreviewViewSurface(previewView: PreviewView): Surface? {
+        if (previewView.childCount == 0) return null
+        val child = previewView.getChildAt(0)
+        if (child is TextureView && child.isAvailable) {
+            return Surface(child.surfaceTexture)
+        }
+        DebugLog.w(TAG, "PreviewView 内部不是 TextureView 或未就绪: ${child?.javaClass?.simpleName}")
+        return null
+    }
+
+    /**
+     * 打开 Camera2 设备（suspend 函数）
+     */
+    private suspend fun openCamera2Device(
+        cameraManager: CameraManager,
+        cameraId: String,
+        handler: Handler,
+    ): CameraDevice = suspendCancellableCoroutine { cont ->
+        cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
+            override fun onOpened(camera: CameraDevice) {
+                DebugLog.d(TAG, "Camera2 设备已打开: $cameraId")
+                cont.resume(camera)
+            }
+            override fun onDisconnected(camera: CameraDevice) {
+                DebugLog.w(TAG, "Camera2 设备断开: $cameraId")
+                camera.close()
+                if (cont.isActive) cont.resumeWithException(
+                    IllegalStateException("Camera2 设备断开连接")
+                )
+            }
+            override fun onError(camera: CameraDevice, error: Int) {
+                DebugLog.e(TAG, "Camera2 设备错误: $cameraId, error=$error")
+                camera.close()
+                if (cont.isActive) cont.resumeWithException(
+                    IllegalStateException("Camera2 设备打开失败: error=$error")
+                )
+            }
+        }, handler)
+
+        cont.invokeOnCancellation {
+            try { cameraManager.getCameraIdList() } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * 创建 Camera2 CaptureSession（suspend 函数）
+     */
+    private suspend fun createCaptureSession(
+        device: CameraDevice,
+        surfaces: List<Surface>,
+        handler: Handler,
+    ): CameraCaptureSession = suspendCancellableCoroutine { cont ->
+        device.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
+            override fun onConfigured(session: CameraCaptureSession) {
+                DebugLog.d(TAG, "Camera2 CaptureSession 已配置: ${surfaces.size} 个 Surface")
+                cont.resume(session)
+            }
+            override fun onConfigureFailed(session: CameraCaptureSession) {
+                DebugLog.e(TAG, "Camera2 CaptureSession 配置失败")
+                if (cont.isActive) cont.resumeWithException(
+                    IllegalStateException("Camera2 CaptureSession 配置失败")
+                )
+            }
+        }, handler)
     }
 
     /**
@@ -485,6 +822,7 @@ class CameraController(private val context: Context) {
      * 释放所有摄像头绑定
      */
     fun release() {
+        stopCamera2Session()
         cameraProvider?.unbindAll()
         cameraProvider = null
         analyzerExecutor.shutdownNow()

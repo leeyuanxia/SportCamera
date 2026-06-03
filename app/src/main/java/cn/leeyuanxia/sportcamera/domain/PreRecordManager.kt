@@ -1,5 +1,6 @@
 package cn.leeyuanxia.sportcamera.domain
 
+import android.view.Surface
 import cn.leeyuanxia.sportcamera.util.DebugLog
 import cn.leeyuanxia.sportcamera.domain.model.PreRecordDuration
 import cn.leeyuanxia.sportcamera.domain.model.ResolutionProfile
@@ -49,6 +50,18 @@ class PreRecordManager : FrameConsumer {
     @Volatile
     private var ringBufferGeneration: Int = 0
 
+    /**
+     * Surface 模式回调 — 编码器 Surface 创建后通知 VoiceTriggerRecorder 绑定 Camera2
+     *
+     * 回调在 FrameAnalyzer 线程（ensureEncoder → createBuffer）中触发，
+     * 回调内需要切换到协程调度器才能调用 CameraController 的 suspend 方法。
+     */
+    var encoderSurfaceReady: ((Surface) -> Unit)? = null
+
+    /** 当前是否处于 Surface 模式 */
+    val isSurfaceMode: Boolean
+        get() = ringBuffer?.useSurfaceInput == true
+
     fun setDuration(duration: PreRecordDuration) { currentDuration = duration }
     fun setProfile(profile: ResolutionProfile) { currentProfile = profile }
     fun setOrientation(o: cn.leeyuanxia.sportcamera.domain.model.RecordOrientation) {}
@@ -58,6 +71,38 @@ class PreRecordManager : FrameConsumer {
      */
     fun markReadyToCreate() {
         readyToCreate = true
+    }
+
+    /**
+     * Surface 模式专用：主动创建编码器（不等首帧）
+     *
+     * Surface 模式下帧由 Camera2 直接写入 encoder Surface，不经过 CameraFramePipeline，
+     * 无法通过 feedFrame → ensureEngine → createBuffer 路径触发编码器创建。
+     *
+     * 此方法使用用户 profile 的分辨率参数直接创建编码器，
+     * 编码器 Surface 通过 encoderSurfaceReady 回调通知外部绑定 Camera2。
+     *
+     * 调用时机：VoiceTriggerRecorder.enterStandby() 中 Surface 模式分支
+     */
+    fun createSurfaceEncoder() {
+        if (drainStarted) {
+            DebugLog.d(TAG, "createSurfaceEncoder: 编码器已存在，跳过")
+            return
+        }
+        val w = currentProfile.width
+        val h = currentProfile.height
+        if (w <= 0 || h <= 0) {
+            DebugLog.e(TAG, "createSurfaceEncoder: 无效分辨率 ${w}x${h}")
+            return
+        }
+        cameraWidth = w
+        cameraHeight = h
+        val config = throttleConfig
+        createBuffer(
+            w, h,
+            fps = config?.preRecordFps ?: currentProfile.fps,
+            bitrateBps = config?.preRecordBitrateBps ?: currentProfile.bitrateBps,
+        )
     }
 
     /**
@@ -82,16 +127,39 @@ class PreRecordManager : FrameConsumer {
             fps = fps,
             bitrateBps = bitrateBps,
         )
-        // 在局部变量上完成全部初始化
-        recorder.prepare()
-        recorder.start()
-        drainStarted = true
-        ringBufferGeneration++ // 通知 drainLoop 有新编码器
-        // 安全发布：最后才写入 volatile 字段，确保 drainLoop 看到完全初始化的实例
-        ringBuffer = recorder
+
+        if (recorder.useSurfaceInput) {
+            // Surface 模式（4K@60fps）：相机直接输出到编码器 Surface
+            try {
+                val surface = recorder.prepareWithSurface()
+                recorder.start()
+                drainStarted = true
+                ringBufferGeneration++
+                ringBuffer = recorder
+                // 通知外部（VoiceTriggerRecorder）绑定 Camera2 会话
+                encoderSurfaceReady?.invoke(surface)
+                DebugLog.d(TAG, "环形缓冲已创建(Surface模式, gen=$ringBufferGeneration): ${w}x${h} @${fps}fps ${bitrateBps/1000}kbps, ${currentDuration.seconds}s")
+            } catch (e: Exception) {
+                // Surface 模式不支持，降级到 ByteBuffer 模式
+                DebugLog.w(TAG, "Surface 模式失败，降级到 ByteBuffer: ${e.message}")
+                recorder.prepare()
+                recorder.start()
+                drainStarted = true
+                ringBufferGeneration++
+                ringBuffer = recorder
+            }
+        } else {
+            // ByteBuffer 模式：现有逻辑不变
+            recorder.prepare()
+            recorder.start()
+            drainStarted = true
+            ringBufferGeneration++
+            ringBuffer = recorder
+            DebugLog.d(TAG, "环形缓冲已创建(gen=$ringBufferGeneration): ${w}x${h} @${fps}fps ${bitrateBps/1000}kbps, ${currentDuration.seconds}s")
+        }
+
         // 释放旧缓冲（在新缓冲发布之后，避免 ringBuffer 出现为 null 的窗口）
         oldBuffer?.release()
-        DebugLog.d(TAG, "环形缓冲已创建 (gen=$ringBufferGeneration): ${w}x${h} @${fps}fps ${bitrateBps/1000}kbps, ${currentDuration.seconds}s")
     }
 
     /**
@@ -131,6 +199,8 @@ class PreRecordManager : FrameConsumer {
     }
 
     override fun feedFrame(yuvData: ByteArray, timestampUs: Long, width: Int, height: Int) {
+        // Surface 模式下帧由 Camera2 直接写入 encoder Surface，不经过此路径
+        if (ringBuffer?.useSurfaceInput == true) return
         ensureEncoder(width, height)
         ringBuffer?.feedFrame(yuvData, timestampUs, width, height)
     }
@@ -142,6 +212,8 @@ class PreRecordManager : FrameConsumer {
      * 直接写入编码器输入缓冲区，省去 ~12MB 的 ByteArray 中转。
      */
     override fun feedFrameDirect(image: android.media.Image, timestampUs: Long, width: Int, height: Int): Boolean {
+        // Surface 模式下帧由 Camera2 直接写入 encoder Surface，不经过此路径
+        if (ringBuffer?.useSurfaceInput == true) return true
         ensureEncoder(width, height)
         return ringBuffer?.feedFrameDirect(image, timestampUs, width, height) ?: false
     }
@@ -179,7 +251,9 @@ class PreRecordManager : FrameConsumer {
     /**
      * 接收热管理配置，动态调整预录参数
      *
-     * 仅当参数实际变化时才重建编码器，避免无谓重建丢失帧。
+     * ByteBuffer 模式：参数变化时重建编码器
+     * Surface 模式：不重建编码器（重建需要重建 Camera2 会话，代价太大），
+     *   仅记录新配置，帧率变更通过 encoderSurfaceReady 回调已由外部处理
      */
     fun updateThrottleConfig(config: ThermalThrottler.ThrottleConfig) {
         val oldConfig = throttleConfig
@@ -190,6 +264,12 @@ class PreRecordManager : FrameConsumer {
             && oldConfig.preRecordFps == config.preRecordFps
             && oldConfig.preRecordBitrateBps == config.preRecordBitrateBps
         ) {
+            return
+        }
+
+        // Surface 模式下不重建编码器，帧率由 Camera2 AE FPS Range 控制
+        if (isSurfaceMode) {
+            DebugLog.d(TAG, "Surface 模式热管理更新: ${oldConfig?.preRecordFps}→${config.preRecordFps}fps（由 AE FPS Range 控制，不重建编码器）")
             return
         }
 
@@ -263,6 +343,7 @@ class PreRecordManager : FrameConsumer {
      * 所有帧被喂入已停止的旧编码器而静默丢弃。
      */
     fun stop() {
+        encoderSurfaceReady = null
         ringBuffer?.stop()
         ringBuffer?.release()
         ringBuffer = null
@@ -273,6 +354,7 @@ class PreRecordManager : FrameConsumer {
     fun clearBuffer() { ringBuffer?.clear() }
 
     fun release() {
+        encoderSurfaceReady = null
         ringBuffer?.release()
         ringBuffer = null
         drainStarted = false

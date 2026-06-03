@@ -12,41 +12,43 @@ package cn.leeyuanxia.sportcamera.util
  */
 object DebugLog {
 
+    private var TAG = "SportCameraLogger"
+
     private val enabled: Boolean get() = cn.leeyuanxia.sportcamera.BuildConfig.DEBUG
 
     fun d(tag: String, msg: String) {
-        if (enabled) android.util.Log.d(tag, msg)
+        if (enabled) android.util.Log.d(TAG, "$tag  ---->$msg")
     }
 
     fun d(tag: String, msg: String, tr: Throwable) {
-        if (enabled) android.util.Log.d(tag, msg, tr)
+        if (enabled) android.util.Log.d(TAG, "$tag  ---->$msg", tr)
     }
 
     fun e(tag: String, msg: String) {
-        if (enabled) android.util.Log.e(tag, msg)
+        if (enabled) android.util.Log.e(TAG, "$tag  ---->$msg")
     }
 
     fun e(tag: String, msg: String, tr: Throwable) {
-        if (enabled) android.util.Log.e(tag, msg, tr)
+        if (enabled) android.util.Log.e(TAG, "$tag  ---->$msg", tr)
     }
 
     fun w(tag: String, msg: String) {
-        if (enabled) android.util.Log.w(tag, msg)
+        if (enabled) android.util.Log.w(TAG, "$tag  ---->$msg")
     }
 
     fun w(tag: String, msg: String, tr: Throwable) {
-        if (enabled) android.util.Log.w(tag, msg, tr)
+        if (enabled) android.util.Log.w(TAG, "$tag  ---->$msg", tr)
     }
 
     fun w(tag: String, tr: Throwable) {
-        if (enabled) android.util.Log.w(tag, tr)
+        if (enabled) android.util.Log.w(TAG,tag, tr)
     }
 
     fun i(tag: String, msg: String) {
-        if (enabled) android.util.Log.i(tag, msg)
+        if (enabled) android.util.Log.i(TAG, "$tag  ---->$msg")
     }
 
     fun i(tag: String, msg: String, tr: Throwable) {
-        if (enabled) android.util.Log.i(tag, msg, tr)
+        if (enabled) android.util.Log.i(TAG, "$tag  ---->$msg", tr)
     }
 }

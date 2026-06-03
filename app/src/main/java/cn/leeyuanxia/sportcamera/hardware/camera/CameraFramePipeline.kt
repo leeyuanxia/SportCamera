@@ -60,6 +60,23 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
     private var cameraFps: Int = 30
 
     /**
+     * 是否处于 Surface 模式（4K@60fps）
+     *
+     * Surface 模式下 Camera2 直接输出到编码器 Surface，
+     * ImageAnalysis 不参与编码数据流，analyze() 直接跳过。
+     */
+    @Volatile
+    private var surfaceMode: Boolean = false
+
+    /**
+     * 设置 Surface 模式状态
+     */
+    fun setSurfaceMode(enabled: Boolean) {
+        surfaceMode = enabled
+        DebugLog.d(TAG, "Surface 模式: $enabled")
+    }
+
+    /**
      * 设置摄像头实际输出帧率
      *
      * 由 CameraController 在每次 bindPreview 时同步传入，
@@ -105,6 +122,15 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
      */
     override fun analyze(image: ImageProxy) {
         totalFrameCount++
+
+        // Surface 模式（4K@60fps）下编码器由 Camera2 直接喂帧，
+        // ImageAnalysis 不参与编码数据流。此回调不会被触发（无 ImageAnalysis use case），
+        // 此检查仅为防御性编码。
+        if (surfaceMode) {
+            image.close()
+            return
+        }
+
         val encoder = currentEncoder
         if (encoder == null) {
             discardedCount++
@@ -139,6 +165,11 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
             // 条件：目标尺寸 == 相机输出尺寸（无需裁剪/缩放）
             val needResize = targetWidth > 0 && targetHeight > 0
                 && (frameW != targetWidth || frameH != targetHeight)
+
+            // 诊断日志：前10帧记录相机实际分辨率与目标分辨率对比
+            if (fedFrameCount < 5) {
+                DebugLog.d(TAG, "帧诊断: 相机=${frameW}x${frameH}, 目标=${targetWidth}x${targetHeight}, needResize=$needResize")
+            }
 
             if (!needResize && frameW >= 3840) {
                 val success = encoder.feedFrameDirect(proxyImage, timestampUs, frameW, frameH)
