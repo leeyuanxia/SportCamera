@@ -7,7 +7,7 @@
 ## 项目概述
 
 - **包名**: `cn.leeyuanxia.sportcamera`
-- **定位**: 运动相机 Android App，语音唤醒词自动触发录像
+- **定位**: 运动相机 Android App，语音唤醒词自动触发录像，支持视频防抖 (EIS)
 - **最低版本**: Android 14 (API 34) | **目标版本**: Android 16 (API 36)
 - **技术栈**: Kotlin 100%, Jetpack Compose, CameraX 1.4.1, Camera2 API, MediaCodec H.264, sherpa-onnx KWS
 - **架构**: 单 Activity + MVVM + 手动 DI (`AppContainer`)

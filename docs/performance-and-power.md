@@ -328,3 +328,23 @@ CameraViewModel.monitorBattery()
 2. 确认 FPS Range 支持：设备需支持 `[60, 60]` 或包含 60 的范围
 3. 确认 PreviewView 使用 COMPATIBLE 模式（Surface 模式需要从 TextureView 获取 Surface）
 4. 降级回 ByteBuffer 后帧率约 50fps（ISP YUV 带宽瓶颈），属于正常现象
+
+### 视频防抖 (EIS)
+
+**原理**：通过 Camera2 API 的 `CONTROL_VIDEO_STABILIZATION_MODE_ON` 开启硬件级电子防抖，相机 ISP 对每帧做反向运动补偿以消除手持抖动。开启后会轻微裁剪画面（FOV 减小），这是正常现象。
+
+**能力检测**：启动/切换镜头时自动查询 `CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES`，不支持 ON 模式的设备 UI 开关置灰。
+
+**双路径实现**：
+- CameraX 路径：通过 `Camera2Interop.Extender` 在 Preview 和 ImageAnalysis 的 CaptureRequest 中设置
+- Camera2 Surface 路径：直接在 `CaptureRequest.Builder` 中设置，热管理降频时通过 `rebuildSurfaceCaptureRequest()` 保留设置
+
+**录制保护**：录制中切换防抖会导致视频中途画面跳动，ViewModel 层通过 `appState.isRecording` 检查自动拒绝。
+
+**关键日志**：
+- ✅ `EIS 支持检测: cameraId=X, modes=[0,1], supported=true` — 设备支持
+- ✅ `视频防抖已开启, mode=1` — 防抖已启用
+- ⚠️ `当前设备不支持 EIS，忽略开启请求` — 设备不支持（UI 开关灰色）
+- ⚠️ `录制中禁止切换防抖` — 录制中操作被拒绝
+
+**功耗影响**：EIS 由相机 ISP 硬件处理，CPU 开销可忽略，对电池续航无明显影响。

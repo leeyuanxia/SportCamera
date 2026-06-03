@@ -207,6 +207,8 @@ AudioRecord (16kHz, Mono, PCM16)
   双 Surface 输出（预览 + 编码器 InputSurface），通过 `CONTROL_AE_TARGET_FPS_RANGE` 控制帧率
 - `updateSurfaceFps()`：Surface 模式下热管理降频（修改 AE FPS Range）
 - `rebindWithProfile()`：分辨率/帧率变更时重新绑定，Surface 模式下跳过 CameraX 重建
+- **视频防抖 (EIS)**：通过 `CONTROL_VIDEO_STABILIZATION_MODE` 开启，CameraX 路径用 Camera2Interop、
+  Camera2 路径直接在 CaptureRequest 中设置，`rebuildSurfaceCaptureRequest()` 确保热管理不丢失 EIS 设置
 
 ### CameraFramePipeline — 帧路由中心
 

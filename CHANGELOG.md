@@ -2,6 +2,26 @@
 
 所有重要更改均记录在此文件中。
 
+## [2026-06-03] 视频防抖 (EIS)
+
+### 新增
+
+- **电子防抖 (EIS)**：通过 Camera2 `CONTROL_VIDEO_STABILIZATION_MODE` 开启硬件电子防抖，骑行/跑步等运动场景画面更稳定
+- **双路径覆盖**：CameraX 路径（Camera2Interop）和 Camera2 Surface 路径（CaptureRequest）均支持
+- **能力检测**：启动时自动查询 `CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES`，不支持的设备自动隐藏开关
+- **录制保护**：录制中禁止切换防抖，避免视频中途画面跳动
+- **热管理兼容**：Surface 模式降频时通过 `rebuildSurfaceCaptureRequest()` 保留 EIS 设置不丢失
+
+### 涉及文件
+
+- `data/SettingsRepository.kt` — `booleanPreferencesKey("video_stabilization")` 持久化
+- `hardware/camera/CameraController.kt` — EIS 检测、设置、CameraX/Camera2 双路径应用
+- `viewmodel/CameraViewModel.kt` — `videoStabilization`/`eisSupported` StateFlow
+- `ui/component/ControlBar.kt` — 设置面板「视频防抖」关闭/开启 Chip
+- `ui/screen/MainScreen.kt` — 接线
+
+---
+
 ## [2026-06-03] 4K@60fps Surface 模式 & 双路径编码
 
 ### 新增
