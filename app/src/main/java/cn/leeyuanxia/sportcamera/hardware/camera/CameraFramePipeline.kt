@@ -1,6 +1,6 @@
 package cn.leeyuanxia.sportcamera.hardware.camera
 
-import android.util.Log
+import cn.leeyuanxia.sportcamera.util.DebugLog
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 
@@ -52,7 +52,7 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
     fun setTargetSize(width: Int, height: Int) {
         targetWidth = width
         targetHeight = height
-        Log.d(TAG, "目标编码尺寸: ${width}x${height}")
+        DebugLog.d(TAG, "目标编码尺寸: ${width}x${height}")
     }
 
     /**
@@ -67,7 +67,7 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
         // 相机通常输出 30fps，计算跳帧比例
         val estimatedCameraFps = 30
         skipPattern = (estimatedCameraFps / fps).coerceAtLeast(1)
-        Log.d(TAG, "目标帧率: ${fps}fps, 跳帧比例: 1/${skipPattern}")
+        DebugLog.d(TAG, "目标帧率: ${fps}fps, 跳帧比例: 1/${skipPattern}")
     }
 
     /**
@@ -76,9 +76,9 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
     fun setEncoder(encoder: FrameConsumer?) {
         currentEncoder = encoder
         if (encoder != null) {
-            Log.d(TAG, "编码器已连接: ${encoder::class.simpleName}, 目标=${targetWidth}x${targetHeight}, skip=1/${skipPattern}")
+            DebugLog.d(TAG, "编码器已连接: ${encoder::class.simpleName}, 目标=${targetWidth}x${targetHeight}, skip=1/${skipPattern}")
         } else {
-            Log.d(TAG, "编码器已断开（已喂 $fedFrameCount 帧，丢弃 $discardedCount 帧）")
+            DebugLog.d(TAG, "编码器已断开（已喂 $fedFrameCount 帧，丢弃 $discardedCount 帧）")
             fedFrameCount = 0
             discardedCount = 0
         }
@@ -93,7 +93,7 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
         if (encoder == null) {
             discardedCount++
             if (discardedCount % 15 == 1L) {
-                Log.d(TAG, "无编码器，丢弃帧 (总接收: $totalFrameCount, 累计丢弃: $discardedCount)")
+                DebugLog.d(TAG, "无编码器，丢弃帧 (总接收: $totalFrameCount, 累计丢弃: $discardedCount)")
             }
             image.close()
             return
@@ -139,11 +139,11 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
 
             fedFrameCount++
             if (fedFrameCount % 150 == 0L) {
-                Log.d(TAG, "帧 ${frameW}x${frameH} → NV12 ${nv12.size}B, ts=${timestampUs}μs, 已喂: $fedFrameCount")
+                DebugLog.d(TAG, "帧 ${frameW}x${frameH} → NV12 ${nv12.size}B, ts=${timestampUs}μs, 已喂: $fedFrameCount")
             }
             encoder.feedFrame(nv12, timestampUs, frameW, frameH)
         } catch (e: Exception) {
-            Log.w(TAG, "帧处理失败 (总接收: $totalFrameCount)", e)
+            DebugLog.w(TAG, "帧处理失败 (总接收: $totalFrameCount)", e)
         } finally {
             image.close()
         }

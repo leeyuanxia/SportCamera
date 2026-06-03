@@ -2,15 +2,16 @@ package cn.leeyuanxia.sportcamera.domain
 
 import android.content.Context
 import android.content.Intent
-import android.util.Log
+import cn.leeyuanxia.sportcamera.util.DebugLog
 import androidx.core.content.ContextCompat
 import cn.leeyuanxia.sportcamera.domain.model.PreRecordDuration
 import cn.leeyuanxia.sportcamera.domain.model.RecordOrientation
 import cn.leeyuanxia.sportcamera.domain.model.ResolutionProfile
 import cn.leeyuanxia.sportcamera.hardware.audio.AudioRecorder
 import cn.leeyuanxia.sportcamera.hardware.audio.KwsManager
-import cn.leeyuanxia.sportcamera.hardware.camera.ActiveRecorder
+import cn.leeyuanxia.sportcamera.hardware.audio.RingBufferAudioRecorder
 import cn.leeyuanxia.sportcamera.hardware.camera.CameraFramePipeline
+import cn.leeyuanxia.sportcamera.hardware.camera.RingBufferRecorder.Companion.isConfigFrame
 import cn.leeyuanxia.sportcamera.hardware.storage.VideoStorageManager
 import cn.leeyuanxia.sportcamera.power.PowerStateManager
 import cn.leeyuanxia.sportcamera.power.ThermalThrottler
@@ -23,7 +24,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * 语音触发录像的核心编排器
@@ -61,6 +61,11 @@ class VoiceTriggerRecorder(
     private var recordJob: Job? = null
     private var preRecordDrainJob: Job? = null
     private var throttleJob: Job? = null
+
+    // 音频预录（待机时持续采集 AAC 到环形缓冲）
+    private var preAudioRecorder: RingBufferAudioRecorder? = null
+    private var preAudioCaptureJob: Job? = null
+    private var preAudioDrainJob: Job? = null
 
     @Volatile
     private var currentDuration: PreRecordDuration = PreRecordDuration.DEFAULT
@@ -110,17 +115,38 @@ class VoiceTriggerRecorder(
         val throttleConfig = thermalThrottler.config.value
         framePipeline.setTargetFps(throttleConfig.preRecordFps)
 
-        Log.d(TAG, "预录管线已连接，等待首帧自动创建编码器 (fps=${throttleConfig.preRecordFps})")
+        DebugLog.d(TAG, "预录管线已连接，等待首帧自动创建编码器 (fps=${throttleConfig.preRecordFps})")
 
         // 启动 drain 循环
         preRecordDrainJob = scope.launch {
             preRecordManager.drainLoop()
-            Log.d(TAG, "预录 drain 协程结束")
+            DebugLog.d(TAG, "预录 drain 协程结束")
         }
 
-        // 启动 KWS 监听
+        // 启动 KWS + 音频预录
+        // 关键顺序：先在协程中完成 KWS 初始化（加载模型+创建stream），
+        // 再启动 pre-audio 的 captureAndEncode。
+        // 避免两个 AudioRecord 竞争麦克风（Android 只允许一个同时访问 MIC），
+        // 所以 KWS 使用外部 PCM 模式，由 pre-audio 提供降采样后的数据。
+        kwsManager.setExternalPcmMode(true)
         kwsJob = scope.launch {
-            launch { kwsManager.startListening() }
+            // 步骤 1: 初始化 KWS 模型（加载 onnx 文件，可能耗时几百毫秒）
+            kwsManager.startListening()
+            DebugLog.d(TAG, "KWS 初始化完成，stream 已创建")
+
+            // 步骤 2: 现在启动音频预录（KWS 已就绪，feedPcm 能立即处理数据）
+            val audioRec = RingBufferAudioRecorder(
+                maxDurationSec = currentDuration.seconds,
+                kwsManager = kwsManager,
+            )
+            audioRec.prepare()
+            audioRec.start()
+            preAudioRecorder = audioRec
+            preAudioCaptureJob = launch { audioRec.captureAndEncode() }
+            preAudioDrainJob = launch { audioRec.drainEncoder() }
+            DebugLog.d(TAG, "音频预录已启动: ${currentDuration.seconds}s 环形缓冲, KWS外部PCM模式")
+
+            // 步骤 3: 订阅唤醒词事件
             kwsManager.keywordFlow.collect { keyword ->
                 if (kwsManager.matchStartRecording(keyword)) {
                     onWakeWordDetected()
@@ -131,7 +157,7 @@ class VoiceTriggerRecorder(
         // 热管理监听：自适应调整预录参数和 KWS 间隔
         throttleJob = scope.launch {
             thermalThrottler.config.collect { config ->
-                Log.d(TAG, "热管理配置更新: fps=${config.preRecordFps}, bitrate=${config.preRecordBitrateBps}, kwsInterval=${config.kwsReadIntervalMs}ms")
+                DebugLog.d(TAG, "热管理配置更新: fps=${config.preRecordFps}, bitrate=${config.preRecordBitrateBps}, kwsInterval=${config.kwsReadIntervalMs}ms")
                 preRecordManager.updateThrottleConfig(config)
                 framePipeline.setTargetFps(config.preRecordFps)
                 kwsManager.updateReadInterval(config.kwsReadIntervalMs)
@@ -140,144 +166,121 @@ class VoiceTriggerRecorder(
     }
 
     /**
-     * 唤醒词检测到 → 开始录像流程
+     * 唤醒词检测到 → 开始录像流程（纯预录模式）
+     *
+     * 核心设计：整个录像过程中编码器从不停止，触发只是"标记时间点"。
+     * 到达总时长后从环形缓冲 dump 完整窗口帧，全程无编码器切换、无帧丢失。
+     *
+     * 与旧方案的关键区别：
+     * - 旧：停止预录编码器 → 创建新编码器(ActiveRecorder) → 录制后半段 → 合成
+     * - 新：预录编码器保持运行 → 等待 postHalfMs → dump 完整窗口 → 合成
      */
     private fun onWakeWordDetected() {
         kwsManager.stopListening()
+        kwsManager.setExternalPcmMode(false)  // 唤醒后 KWS 不再需要 PCM 数据
         throttleJob?.cancel()
 
-        val rawPostDurationMs = currentDuration.postHalfMs
         val totalDurationMs = currentDuration.totalMs
+        val postHalfMs = currentDuration.postHalfMs
+        val preHalfMs = currentDuration.preHalfMs
 
         recordJob = scope.launch {
             try {
-                // Phase 1: dump 预录缓冲帧（前半段 = preRecordDuration / 2）
-                val preFrames = preRecordManager.dumpPreFrames()
-                Log.d(TAG, "dump 预录帧: ${preFrames.size} 帧, 预计前半段=${currentDuration.preHalfMs}ms")
+                // 前半段已经存在于环形缓冲中，UI 进度从一半开始
+                _appState.value = AppState.Recording(preHalfMs, totalDurationMs)
 
-                // 计算预录段实际时长，用于补偿后录段
-                val actualPreMs = preRecordManager.actualPreDurationMs(preFrames)
-                val postDurationMs: Long = if (actualPreMs < rawPostDurationMs) {
-                    val shortfall = rawPostDurationMs - actualPreMs
-                    Log.d(TAG, "预录段不足 ${shortfall}ms，延长后录段补偿")
-                    rawPostDurationMs + shortfall
-                } else {
-                    rawPostDurationMs
-                }
-                val initialElapsedMs = actualPreMs.coerceAtMost(rawPostDurationMs)
-                _appState.value = AppState.Recording(initialElapsedMs, totalDurationMs)
+                DebugLog.d(TAG, "录像开始（纯预录模式）: 总时长=${totalDurationMs}ms, 前段=${preHalfMs}ms, 后段=${postHalfMs}ms, 编码器持续运行")
 
-                // Phase 1.5: 停止预录编码，断开帧管线
-                framePipeline.setEncoder(null)
-                preRecordDrainJob?.cancel()
-                preRecordManager.stop()
-
-                // 录制时恢复全帧率
-                framePipeline.setTargetFps(currentProfile.fps)
-
-                // Phase 2: 创建高质量编码器，使用相机实际分辨率
-                val encW = preRecordManager.cameraWidth.takeIf { it > 0 } ?: currentProfile.width
-                val encH = preRecordManager.cameraHeight.takeIf { it > 0 } ?: currentProfile.height
-                val activeRecorder = ActiveRecorder(
-                    width = encW,
-                    height = encH,
-                    fps = currentProfile.fps,
-                    bitrateBps = currentProfile.bitrateBps,
-                )
-                activeRecorder.prepare()
-                activeRecorder.startEncoder()
-
-                // 连接帧管线到 ActiveRecorder
-                framePipeline.setEncoder(activeRecorder)
-
-                // Phase 2: 创建音频录制器
-                val audioRecorder = AudioRecorder()
-                audioRecorder.prepare()
-                audioRecorder.start()
-
-                val startTime = System.currentTimeMillis()
-
-                // Phase 2.5: 录制后半段（5 次/秒进度更新，降低 UI 重组频率）
-                val drainJob = launch { activeRecorder.drainEncoder() }
-                val audioCaptureJob = launch { audioRecorder.captureAndEncode() }
-                val audioDrainJob = launch { audioRecorder.drainEncoder() }
-                while (System.currentTimeMillis() - startTime < postDurationMs) {
+                // 等待后半段时间 — 预录持续录制，零帧丢失
+                val waitStartMs = System.currentTimeMillis()
+                while (System.currentTimeMillis() - waitStartMs < postHalfMs) {
                     delay(200)
-                    val postElapsed = System.currentTimeMillis() - startTime
-                    _appState.value = AppState.Recording(
-                        initialElapsedMs + postElapsed, totalDurationMs
-                    )
+                    val postElapsed = System.currentTimeMillis() - waitStartMs
+                    _appState.value = AppState.Recording(preHalfMs + postElapsed, totalDurationMs)
                 }
 
-                // 安全关闭编码器
-                activeRecorder.signalEndOfStream()
+                // 从环形缓冲 dump 完整时间窗口（前后段全部来自同一编码器，PTS 连续）
+                val allFrames = preRecordManager.dumpRecentFrames(totalDurationMs)
+                val allAudioFrames = preAudioRecorder?.dumpRecentFrames(totalDurationMs) ?: emptyList()
+                val audioStartUs = preAudioRecorder?.startTimeUs ?: 0L
+                val audioCsd = preAudioRecorder?.csdData
 
-                // 停止音频录制
-                audioRecorder.stop()
+                val actualDurationMs = if (allFrames.size >= 2) {
+                    val dataFrames = allFrames.filter { !it.isConfigFrame() }
+                    if (dataFrames.size >= 2) {
+                        (dataFrames.last().presentationTimeUs - dataFrames.first().presentationTimeUs) / 1000
+                    } else 0L
+                } else 0L
 
-                val drainTimeout = withTimeoutOrNull(postDurationMs + 2000) {
-                    drainJob.join()
-                }
-                if (drainTimeout == null) {
-                    Log.w(TAG, "drain 编码器超时（${postDurationMs + 2000}ms），强制取消")
-                    drainJob.cancel()
-                }
+                DebugLog.d(TAG, "dump 完整窗口: 视频=${allFrames.size}帧(${actualDurationMs}ms), 音频=${allAudioFrames.size}帧")
 
-                val postFrames = activeRecorder.getAllFrames()
-                Log.d(TAG, "后录帧: ${postFrames.size} 帧")
-
-                // 等待音频编码完成
-                withTimeoutOrNull(3000) {
-                    audioDrainJob.join()
-                }
-                val audioFrames = audioRecorder.getEncodedFrames()
-                Log.d(TAG, "音频帧: ${audioFrames.size} 帧")
-
-                // Phase 3: 断开帧管线，合成视频
-                framePipeline.setEncoder(null)
                 _appState.value = AppState.Saving(0f)
 
-                if (preFrames.isEmpty() && postFrames.isEmpty()) {
-                    Log.e(TAG, "前后帧均为空，跳过合成")
+                if (allFrames.isEmpty()) {
+                    DebugLog.e(TAG, "录像数据为空")
                     _appState.value = AppState.Error("录像数据为空")
                     delay(2000)
-                    preRecordManager.clearBuffer()
-                    enterStandby()
+                    restartStandby()
                     return@launch
                 }
 
+                // 合成视频 — 所有帧来自同一编码器，无需 pre/post 分割和 junction 修正
+                val encW = preRecordManager.cameraWidth.takeIf { it > 0 } ?: currentProfile.width
+                val encH = preRecordManager.cameraHeight.takeIf { it > 0 } ?: currentProfile.height
+
+                // 从 RingBufferRecorder 的 outputFormat 提取 CSD（与 ActiveRecorder 方式一致）
+                val ringCsd0 = preRecordManager.getCsdData()
+                val ringCsd1 = preRecordManager.getCsd1Data()
+                DebugLog.d(TAG, "环形缓冲 CSD: csd-0=${ringCsd0?.size ?: 0}B, csd-1=${ringCsd1?.size ?: 0}B")
+
                 val assembler = VideoAssembler(storageManager)
                 val result = assembler.assemble(
-                    preFrames = preFrames,
-                    postFrames = postFrames,
-                    audioFrames = audioFrames,
-                    audioStartTimeUs = audioRecorder.startTimeUs,
+                    preFrames = allFrames,
+                    postFrames = emptyList(),        // 无后录段，全部来自环形缓冲
+                    preAudioFrames = allAudioFrames,
+                    preAudioStartUs = audioStartUs,
+                    audioFrames = emptyList(),        // 无后录音频段
+                    audioStartTimeUs = audioStartUs,
+                    audioCsdData = audioCsd,
                     duration = currentDuration,
                     profile = currentProfile,
                     orientation = currentOrientation,
                     cameraWidth = encW,
                     cameraHeight = encH,
-                    csd0Data = activeRecorder.csd0Data,
-                    csd1Data = activeRecorder.csd1Data,
+                    csd0Data = ringCsd0,             // 从 outputFormat 正确提取的 SPS
+                    csd1Data = ringCsd1,             // 从 outputFormat 正确提取的 PPS
                     onProgress = { progress ->
                         _appState.value = AppState.Saving(progress)
                     },
                 )
-                Log.d(TAG, "视频已保存: $result")
+                DebugLog.d(TAG, "视频已保存: $result")
 
-                // Phase 4: 清空缓冲，回到待机
-                preRecordManager.clearBuffer()
-                enterStandby()
+                // 回到待机状态（清空缓冲，重建编码器，重启 KWS 和热管理）
+                restartStandby()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.e(TAG, "录像失败", e)
-                framePipeline.setEncoder(null)
+                DebugLog.e(TAG, "录像失败", e)
                 _appState.value = AppState.Error(e.message ?: "录像失败")
                 delay(2000)
-                enterStandby()
+                restartStandby()
             }
         }
+    }
+
+    /**
+     * 录像完成后回到待机状态
+     *
+     * 先停止所有资源再调用 enterStandby() 重建一切。
+     * 注意：recordJob 必须在调用 stop() 前置 null，防止 stop() 取消当前协程。
+     * stop() 和 enterStandby() 之间加 delay 确保前台服务完全停止后再重启，
+     * 避免 ForegroundServiceDidNotStartInTimeException。
+     */
+    private suspend fun restartStandby() {
+        recordJob = null
+        stop()
+        delay(300)  // 等待前台服务完全停止
+        enterStandby()
     }
 
     fun stop() {
@@ -285,6 +288,12 @@ class VoiceTriggerRecorder(
         recordJob?.cancel()
         preRecordDrainJob?.cancel()
         throttleJob?.cancel()
+        // 清理音频预录
+        preAudioCaptureJob?.cancel()
+        preAudioDrainJob?.cancel()
+        preAudioRecorder?.stop()
+        preAudioRecorder?.release()
+        preAudioRecorder = null
         kwsManager.stopListening()
         preRecordManager.stop()
         framePipeline.setEncoder(null)
@@ -308,9 +317,9 @@ class VoiceTriggerRecorder(
                 action = CameraForegroundService.ACTION_START
             }
             ContextCompat.startForegroundService(context, intent)
-            Log.d(TAG, "前台服务已启动")
+            DebugLog.d(TAG, "前台服务已启动")
         } catch (e: Exception) {
-            Log.w(TAG, "启动前台服务失败: ${e.message}")
+            DebugLog.w(TAG, "启动前台服务失败: ${e.message}")
         }
     }
 
@@ -321,7 +330,7 @@ class VoiceTriggerRecorder(
             }
             context.startService(intent)
         } catch (e: Exception) {
-            Log.w(TAG, "停止前台服务失败: ${e.message}")
+            DebugLog.w(TAG, "停止前台服务失败: ${e.message}")
         }
     }
 }

@@ -6,7 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
-import android.util.Log
+import cn.leeyuanxia.sportcamera.util.DebugLog
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import cn.leeyuanxia.sportcamera.di.AppContainer
@@ -220,7 +220,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             // 预览正在显示 → 立即关闭
             peekJob?.cancel()
             _previewVisible.value = false
-            Log.d(TAG, "窥视预览手动关闭")
+            DebugLog.d(TAG, "窥视预览手动关闭")
         } else {
             // 预览隐藏 → 显示，30s 后自动关闭
             _previewVisible.value = true
@@ -228,9 +228,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             peekJob = viewModelScope.launch {
                 delay(PEEK_DURATION_MS)
                 _previewVisible.value = false
-                Log.d(TAG, "窥视预览 ${PEEK_DURATION_MS / 1000}s 到期，自动关闭")
+                DebugLog.d(TAG, "窥视预览 ${PEEK_DURATION_MS / 1000}s 到期，自动关闭")
             }
-            Log.d(TAG, "窥视预览开始，${PEEK_DURATION_MS / 1000}s 后自动关闭")
+            DebugLog.d(TAG, "窥视预览开始，${PEEK_DURATION_MS / 1000}s 后自动关闭")
         }
     }
 
@@ -261,9 +261,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 data = Uri.parse("package:${context.packageName}")
             }
             context.startActivity(intent)
-            Log.d(TAG, "已请求电池优化白名单")
+            DebugLog.d(TAG, "已请求电池优化白名单")
         } catch (e: Exception) {
-            Log.w(TAG, "请求电池优化白名单失败: ${e.message}")
+            DebugLog.w(TAG, "请求电池优化白名单失败: ${e.message}")
         }
     }
 
@@ -274,9 +274,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             // 实际切换摄像头（重新绑定 CameraX）
             val switched = cameraController.switchLens(lens)
             if (switched != null) {
-                Log.d(TAG, "镜头已切换: $switched")
+                DebugLog.d(TAG, "镜头已切换: $switched")
             } else {
-                Log.w(TAG, "镜头切换失败 — 相机尚未绑定")
+                DebugLog.w(TAG, "镜头切换失败 — 相机尚未绑定")
             }
         }
     }

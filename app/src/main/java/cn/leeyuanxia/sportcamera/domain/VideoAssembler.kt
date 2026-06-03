@@ -27,8 +27,10 @@ class VideoAssembler(
      *
      * @param preFrames  前半段帧（环形缓冲）
      * @param postFrames 后半段帧（唤醒后录制）
+     * @param preAudioFrames 前半段音频帧（音频环形缓冲）
+     * @param preAudioStartUs 预录音频的 startTimeUs 基准
      * @param audioFrames 后录阶段的 AAC 音频帧
-     * @param audioStartTimeUs 音频录制开始时的 nanoTime/1000 基准
+     * @param audioStartTimeUs 后录音频的 startTimeUs 基准
      * @param duration   预录时长设定
      * @param profile    用户选择的分辨率档位
      * @param orientation 录制方向（横屏/竖屏）
@@ -38,8 +40,11 @@ class VideoAssembler(
     fun assemble(
         preFrames: List<RingBufferRecorder.EncodedFrame>,
         postFrames: List<RingBufferRecorder.EncodedFrame>,
+        preAudioFrames: List<AudioRecorder.EncodedAudioFrame> = emptyList(),
+        preAudioStartUs: Long = 0L,
         audioFrames: List<AudioRecorder.EncodedAudioFrame>,
         audioStartTimeUs: Long,
+        audioCsdData: ByteArray? = null,
         duration: PreRecordDuration,
         profile: ResolutionProfile,
         orientation: RecordOrientation = RecordOrientation.LANDSCAPE,
@@ -58,8 +63,11 @@ class VideoAssembler(
         storageManager.assembleToMp4(
             preFrames = preFrames,
             postFrames = postFrames,
+            preAudioFrames = preAudioFrames,
+            preAudioStartUs = preAudioStartUs,
             audioFrames = audioFrames,
             audioStartTimeUs = audioStartTimeUs,
+            audioCsdData = audioCsdData,
             output = output,
             width = cameraWidth,
             height = cameraHeight,

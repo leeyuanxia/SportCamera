@@ -3,7 +3,7 @@ package cn.leeyuanxia.sportcamera.power
 import android.content.Context
 import android.os.BatteryManager
 import android.os.PowerManager
-import android.util.Log
+import cn.leeyuanxia.sportcamera.util.DebugLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -52,7 +52,7 @@ class PowerStateManager(private val context: Context) {
         ).apply {
             acquire() // 无超时，由 releaseWakeLock() 释放
         }
-        Log.d(TAG, "WakeLock 已获取（无超时）")
+        DebugLog.d(TAG, "WakeLock 已获取（无超时）")
     }
 
     /**
@@ -62,7 +62,7 @@ class PowerStateManager(private val context: Context) {
         wakeLock?.let {
             if (it.isHeld) {
                 it.release()
-                Log.d(TAG, "WakeLock 已释放")
+                DebugLog.d(TAG, "WakeLock 已释放")
             }
         }
         wakeLock = null

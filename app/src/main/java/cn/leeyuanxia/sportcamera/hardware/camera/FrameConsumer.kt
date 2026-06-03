@@ -1,7 +1,7 @@
 package cn.leeyuanxia.sportcamera.hardware.camera
 
 import android.media.Image
-import android.util.Log
+import cn.leeyuanxia.sportcamera.util.DebugLog
 
 /**
  * YUV 图像格式转换工具
@@ -162,7 +162,7 @@ object YuvConverter {
             cropY = (srcH - cropH) / 2
         }
 
-        Log.d(TAG, "裁剪缩放: ${srcW}×${srcH} → 裁剪 ${cropW}×${cropH}@(${cropX},${cropY}) → ${dstW}×${dstH}")
+        DebugLog.d(TAG, "裁剪缩放: ${srcW}×${srcH} → 裁剪 ${cropW}×${cropH}@(${cropX},${cropY}) → ${dstW}×${dstH}")
 
         val dstSize = dstW * dstH * 3 / 2
         val dst = if (reuse != null && reuse.size == dstSize) reuse else ByteArray(dstSize)

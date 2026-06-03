@@ -3,7 +3,7 @@ package cn.leeyuanxia.sportcamera.hardware.camera
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
-import android.util.Log
+import cn.leeyuanxia.sportcamera.util.DebugLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -100,7 +100,7 @@ class ActiveRecorder(
     fun startEncoder() {
         encoder?.start()
         isRunning = true
-        Log.d(TAG, "编码器已启动: ${width}x${height} @${fps}fps, ${bitrateBps/1000}kbps")
+        DebugLog.d(TAG, "编码器已启动: ${width}x${height} @${fps}fps, ${bitrateBps/1000}kbps")
     }
 
     private var feedCount = 0L
@@ -131,7 +131,7 @@ class ActiveRecorder(
                 )
                 feedCount++
                 if (feedCount % 150 == 0L) {
-                    Log.d(TAG, "已喂帧: $feedCount, 丢弃: $dropCount, 收集帧数: ${frames.size}")
+                    DebugLog.d(TAG, "已喂帧: $feedCount, 丢弃: $dropCount, 收集帧数: ${frames.size}")
                 }
             } else {
                 dropCount++
@@ -139,7 +139,7 @@ class ActiveRecorder(
         } catch (e: Exception) {
             dropCount++
             if (dropCount <= 3 || dropCount % 100 == 1L) {
-                Log.w(TAG, "喂帧异常 (丢弃#${dropCount}, 类型=${e.javaClass.simpleName}): ${e.message}", e)
+                DebugLog.w(TAG, "喂帧异常 (丢弃#${dropCount}, 类型=${e.javaClass.simpleName}): ${e.message}", e)
             }
         }
     }
@@ -166,14 +166,14 @@ class ActiveRecorder(
                         inputIndex, 0, 0, 0,
                         MediaCodec.BUFFER_FLAG_END_OF_STREAM
                     )
-                    Log.d(TAG, "EOS 发送成功（第 ${attempt} 次尝试）")
+                    DebugLog.d(TAG, "EOS 发送成功（第 ${attempt} 次尝试）")
                     return
                 }
             }
-            Log.w(TAG, "EOS 发送失败：10 次重试后输入缓冲区仍不可用")
+            DebugLog.w(TAG, "EOS 发送失败：10 次重试后输入缓冲区仍不可用")
         } catch (_: Exception) {
             // 编码器可能已处于错误状态
-            Log.w(TAG, "EOS 发送异常")
+            DebugLog.w(TAG, "EOS 发送异常")
         }
     }
 
@@ -187,7 +187,7 @@ class ActiveRecorder(
         val bufferInfo = MediaCodec.BufferInfo()
         var drainCount = 0L
 
-        Log.d(TAG, "drainEncoder 开始")
+        DebugLog.d(TAG, "drainEncoder 开始")
         try {
             while (true) {
                 val outputIndex = codec.dequeueOutputBuffer(bufferInfo, 10_000)
@@ -208,12 +208,12 @@ class ActiveRecorder(
                         codec.releaseOutputBuffer(outputIndex, false)
 
                         if (drainCount == 1L || drainCount % 150 == 0L) {
-                            Log.d(TAG, "已 drain: $drainCount 帧, 收集: ${frames.size}")
+                            DebugLog.d(TAG, "已 drain: $drainCount 帧, 收集: ${frames.size}")
                         }
 
                         // 收到 EOS → drain 完成，退出循环
                         if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                            Log.d(TAG, "收到 EOS，drain 完成")
+                            DebugLog.d(TAG, "收到 EOS，drain 完成")
                             break
                         }
                     }
@@ -231,19 +231,19 @@ class ActiveRecorder(
                                 csd1Data = ByteArray(it.remaining())
                                 it.get(csd1Data!!)
                             }
-                            Log.d(TAG, "CSD 已提取: csd-0=${csd0Data?.size ?: 0}B, csd-1=${csd1Data?.size ?: 0}B")
+                            DebugLog.d(TAG, "CSD 已提取: csd-0=${csd0Data?.size ?: 0}B, csd-1=${csd1Data?.size ?: 0}B")
                         } catch (_: Exception) {}
                     }
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "drainEncoder 退出 (drain了${drainCount}帧): ${e.message}")
+            DebugLog.w(TAG, "drainEncoder 退出 (drain了${drainCount}帧): ${e.message}")
         } finally {
             try { codec.stop() } catch (_: Exception) {}
             codec.release()
             encoder = null
         }
-        Log.d(TAG, "drainEncoder 结束, 总计 drain: $drainCount 帧")
+        DebugLog.d(TAG, "drainEncoder 结束, 总计 drain: $drainCount 帧")
     }
 
     /**

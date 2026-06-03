@@ -21,8 +21,21 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        create("sportcamera") {
+            storeFile = file("../keystore")
+            storePassword = "1152557928"
+            keyAlias = "sportcamera"
+            keyPassword = "1152557928"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("sportcamera")
+        }
         release {
+            signingConfig = signingConfigs.getByName("sportcamera")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -33,16 +46,17 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_21
-        targetCompatibility = JavaVersion.VERSION_21
+        sourceCompatibility = JavaVersion.VERSION_19
+        targetCompatibility = JavaVersion.VERSION_19
     }
 
     kotlin {
-        jvmToolchain(21)
+        jvmToolchain(19)
     }
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     // KWS JNI 预编译库路径

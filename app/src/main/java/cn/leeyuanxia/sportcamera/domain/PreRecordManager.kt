@@ -1,6 +1,6 @@
 package cn.leeyuanxia.sportcamera.domain
 
-import android.util.Log
+import cn.leeyuanxia.sportcamera.util.DebugLog
 import cn.leeyuanxia.sportcamera.domain.model.PreRecordDuration
 import cn.leeyuanxia.sportcamera.domain.model.ResolutionProfile
 import cn.leeyuanxia.sportcamera.hardware.camera.FrameConsumer
@@ -61,7 +61,7 @@ class PreRecordManager : FrameConsumer {
     }
 
     /**
-     * 用相机实际分辨率创建编码器（可选热管理参数）
+     * 用相机实际分辨率和用户选择的码率创建编码器
      *
      * 关键：使用安全发布模式。先在局部变量中完成 prepare() + start()，
      * 最后才赋值给 volatile 字段 ringBuffer。
@@ -69,6 +69,10 @@ class PreRecordManager : FrameConsumer {
      * 如果先写 ringBuffer 再 prepare/start，主线程的 drainLoop 会在
      * prepare/start 完成前就看到非 null 的 ringBuffer，导致 drainEncoder
      * 读到 encoder=null / isRunning=false 立即退出（0 帧 drain）。
+     *
+     * 参数来源：
+     * - 分辨率：相机实际输出（cameraWidth × cameraHeight），与用户选择的 profile 一致
+     * - fps/bitrate：默认使用 currentProfile（用户选择），热管理降级时由 throttleConfig 覆盖
      */
     private fun createBuffer(w: Int, h: Int, fps: Int, bitrateBps: Int) {
         val oldBuffer = ringBuffer
@@ -87,7 +91,7 @@ class PreRecordManager : FrameConsumer {
         ringBuffer = recorder
         // 释放旧缓冲（在新缓冲发布之后，避免 ringBuffer 出现为 null 的窗口）
         oldBuffer?.release()
-        Log.d(TAG, "环形缓冲已创建 (gen=$ringBufferGeneration): ${w}x${h} @${fps}fps ${bitrateBps/1000}kbps, ${currentDuration.seconds}s")
+        DebugLog.d(TAG, "环形缓冲已创建 (gen=$ringBufferGeneration): ${w}x${h} @${fps}fps ${bitrateBps/1000}kbps, ${currentDuration.seconds}s")
     }
 
     /**
@@ -98,7 +102,7 @@ class PreRecordManager : FrameConsumer {
      */
     suspend fun drainLoop() {
         var lastGeneration = ringBufferGeneration
-        Log.d(TAG, "drainLoop 启动，等待 ringBuffer 创建...")
+        DebugLog.d(TAG, "drainLoop 启动，等待 ringBuffer 创建...")
         while (true) {
             // 等待 ringBuffer 存在
             var waits = 0
@@ -108,20 +112,20 @@ class PreRecordManager : FrameConsumer {
             }
             val rb = ringBuffer
             if (rb == null) {
-                Log.e(TAG, "drainLoop: 等待编码器超时（3秒内无帧到达），ringBuffer 仍为 null")
+                DebugLog.e(TAG, "drainLoop: 等待编码器超时（3秒内无帧到达），ringBuffer 仍为 null")
                 return
             }
             lastGeneration = ringBufferGeneration
-            Log.d(TAG, "drainLoop: ringBuffer 已就绪 (gen=$ringBufferGeneration, waits=${waits}x10ms)，开始 drain")
+            DebugLog.d(TAG, "drainLoop: ringBuffer 已就绪 (gen=$ringBufferGeneration, waits=${waits}x10ms)，开始 drain")
             rb.drainEncoder()
             // drainEncoder 返回 = 编码器被 stop
             // 检查是否有新编码器（热管理重建）
             if (ringBufferGeneration != lastGeneration) {
-                Log.d(TAG, "drainLoop: 检测到新编码器 (gen=$ringBufferGeneration)，继续 drain")
+                DebugLog.d(TAG, "drainLoop: 检测到新编码器 (gen=$ringBufferGeneration)，继续 drain")
                 continue
             }
             // 同一个 generation → 正常停止，退出
-            Log.d(TAG, "drainLoop: 编码器正常停止，退出")
+            DebugLog.d(TAG, "drainLoop: 编码器正常停止，退出")
             return
         }
     }
@@ -131,16 +135,17 @@ class PreRecordManager : FrameConsumer {
         if (cameraWidth == 0 && width > 0 && height > 0) {
             cameraWidth = width
             cameraHeight = height
-            Log.d(TAG, "首帧: ${width}x${height}, readyToCreate=$readyToCreate, drainStarted=$drainStarted")
+            DebugLog.d(TAG, "首帧: ${width}x${height}, readyToCreate=$readyToCreate, drainStarted=$drainStarted, profile=${currentProfile.width}x${currentProfile.height}")
         }
 
         // 满足条件时自动创建编码器
+        // 使用用户选择的分辨率档位参数（fps/bitrate），热管理降级时才覆盖
         if (readyToCreate && !drainStarted && cameraWidth > 0) {
             val config = throttleConfig
             createBuffer(
                 cameraWidth, cameraHeight,
-                fps = config?.preRecordFps ?: RingBufferRecorder.STANDBY_FPS,
-                bitrateBps = config?.preRecordBitrateBps ?: RingBufferRecorder.STANDBY_BITRATE,
+                fps = config?.preRecordFps ?: currentProfile.fps,
+                bitrateBps = config?.preRecordBitrateBps ?: currentProfile.bitrateBps,
             )
         }
 
@@ -165,7 +170,7 @@ class PreRecordManager : FrameConsumer {
         }
 
         if (ringBuffer != null && drainStarted) {
-            Log.d(TAG, "热管理触发重建编码器: ${oldConfig?.preRecordFps}→${config.preRecordFps}fps, ${oldConfig?.preRecordBitrateBps}→${config.preRecordBitrateBps}bps")
+            DebugLog.d(TAG, "热管理触发重建编码器: ${oldConfig?.preRecordFps}→${config.preRecordFps}fps, ${oldConfig?.preRecordBitrateBps}→${config.preRecordBitrateBps}bps")
             ringBuffer?.stop()
             ringBuffer?.release()
             drainStarted = false
@@ -188,15 +193,38 @@ class PreRecordManager : FrameConsumer {
     fun dumpPreFrames(): List<RingBufferRecorder.EncodedFrame> {
         val rb = ringBuffer
         if (rb == null) {
-            Log.e(TAG, "dumpPreFrames: ringBuffer 为 null！编码器可能未创建（readyToCreate=$readyToCreate, drainStarted=$drainStarted, cameraSize=${cameraWidth}x${cameraHeight}）")
+            DebugLog.e(TAG, "dumpPreFrames: ringBuffer 为 null！编码器可能未创建（readyToCreate=$readyToCreate, drainStarted=$drainStarted, cameraSize=${cameraWidth}x${cameraHeight}）")
             return emptyList()
         }
         val allCount = rb.bufferSize()
         val recent = rb.dumpRecentFrames(currentDuration.preHalfMs)
         val result = if (recent.isEmpty()) rb.dumpAllFrames() else recent
-        Log.d(TAG, "dumpPreFrames: 缓冲总帧数=$allCount, 最近${currentDuration.preHalfMs}ms帧数=${recent.size}, 最终输出=${result.size}")
+        DebugLog.d(TAG, "dumpPreFrames: 缓冲总帧数=$allCount, 最近${currentDuration.preHalfMs}ms帧数=${recent.size}, 最终输出=${result.size}")
         return result
     }
+
+    /**
+     * 从环形缓冲 dump 最近 N 毫秒的帧（不停止编码器，用于纯预录模式）
+     */
+    fun dumpRecentFrames(durationMs: Long): List<RingBufferRecorder.EncodedFrame> {
+        val rb = ringBuffer ?: run {
+            DebugLog.w(TAG, "dumpRecentFrames: ringBuffer 为 null")
+            return emptyList()
+        }
+        val frames = rb.dumpRecentFrames(durationMs)
+        DebugLog.d(TAG, "dumpRecentFrames(${durationMs}ms): ${frames.size} 帧")
+        return frames
+    }
+
+    /**
+     * 获取环形缓冲编码器的 CSD-0 数据（SPS）
+     */
+    fun getCsdData(): ByteArray? = ringBuffer?.csd0Data
+
+    /**
+     * 获取环形缓冲编码器的 CSD-1 数据（PPS）
+     */
+    fun getCsd1Data(): ByteArray? = ringBuffer?.csd1Data
 
     fun actualPreDurationMs(frames: List<RingBufferRecorder.EncodedFrame>): Long {
         if (frames.size < 2) return 0L

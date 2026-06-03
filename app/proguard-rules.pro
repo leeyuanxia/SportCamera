@@ -19,3 +19,12 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# ===== sherpa-onnx JNI 保护 =====
+# sherpa-onnx 通过 JNI 访问这些类的字段和方法，R8 不能混淆或删除
+-keep class com.k2fsa.sherpa.onnx.** { *; }
+-keepclassmembers class com.k2fsa.sherpa.onnx.** { *; }
+
+# ===== 保持行号信息（方便调试线上崩溃）=====
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile

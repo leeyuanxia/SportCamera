@@ -1,6 +1,6 @@
 package cn.leeyuanxia.sportcamera.hardware.camera
 
-import android.util.Log
+import cn.leeyuanxia.sportcamera.util.DebugLog
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
@@ -62,12 +62,12 @@ class CameraLifecycleOwner : LifecycleOwner {
         // DESTROYED 不可逆 → 必须创建新 Registry
         if (registry.currentState == Lifecycle.State.DESTROYED) {
             registry = LifecycleRegistry(this)
-            Log.d(TAG, "LifecycleRegistry 已重建（之前为 DESTROYED）")
+            DebugLog.d(TAG, "LifecycleRegistry 已重建（之前为 DESTROYED）")
         }
 
         owner.lifecycle.addObserver(activityObserver)
         syncState()
-        Log.d(TAG, "已绑定 Activity 生命周期，当前状态: ${owner.lifecycle.currentState}")
+        DebugLog.d(TAG, "已绑定 Activity 生命周期，当前状态: ${owner.lifecycle.currentState}")
     }
 
     /**
@@ -77,7 +77,7 @@ class CameraLifecycleOwner : LifecycleOwner {
         if (standbyMode) return
         standbyMode = true
         syncState()
-        Log.d(TAG, "进入待机模式 — 相机生命周期锁定为 STARTED")
+        DebugLog.d(TAG, "进入待机模式 — 相机生命周期锁定为 STARTED")
     }
 
     /**
@@ -87,7 +87,7 @@ class CameraLifecycleOwner : LifecycleOwner {
         if (!standbyMode) return
         standbyMode = false
         syncState()
-        Log.d(TAG, "退出待机模式 — 恢复 Activity 生命周期镜像")
+        DebugLog.d(TAG, "退出待机模式 — 恢复 Activity 生命周期镜像")
     }
 
     /**
@@ -102,7 +102,7 @@ class CameraLifecycleOwner : LifecycleOwner {
         if (registry.currentState != Lifecycle.State.DESTROYED) {
             registry.currentState = Lifecycle.State.DESTROYED
         }
-        Log.d(TAG, "已销毁")
+        DebugLog.d(TAG, "已销毁")
     }
 
     override val lifecycle: Lifecycle get() = registry
@@ -129,7 +129,7 @@ class CameraLifecycleOwner : LifecycleOwner {
         }
 
         if (registry.currentState != newState) {
-            Log.d(TAG, "状态变更: ${registry.currentState} → $newState (Activity=$activityState, standby=$standbyMode)")
+            DebugLog.d(TAG, "状态变更: ${registry.currentState} → $newState (Activity=$activityState, standby=$standbyMode)")
             registry.currentState = newState
         }
     }

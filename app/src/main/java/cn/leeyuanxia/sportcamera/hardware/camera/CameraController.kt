@@ -7,6 +7,7 @@ import android.util.Size
 import android.view.Display
 import android.view.Surface
 import androidx.annotation.OptIn
+import cn.leeyuanxia.sportcamera.util.DebugLog
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.AspectRatio
@@ -73,7 +74,7 @@ class CameraController(private val context: Context) {
      * 改用 availableLenses 是否为空来决定是否需要检测。
      */
     suspend fun initialize() {
-        android.util.Log.i(TAG, "initialize() 被调用")
+        DebugLog.i(TAG, "initialize() 被调用")
         if (cameraProvider == null) {
             cameraProvider = ProcessCameraProvider.getInstance(context).await()
         }
@@ -82,11 +83,11 @@ class CameraController(private val context: Context) {
             try {
                 detectAvailableLenses()
             } catch (e: Exception) {
-                android.util.Log.e(TAG, "镜头检测失败: ${e.message}", e)
+                DebugLog.e(TAG, "镜头检测失败: ${e.message}", e)
                 _availableLenses.value = listOf(CameraLens.WIDE)
             }
         } else {
-            android.util.Log.i(TAG, "镜头已检测过，跳过: ${_availableLenses.value}")
+            DebugLog.i(TAG, "镜头已检测过，跳过: ${_availableLenses.value}")
         }
     }
 
@@ -108,14 +109,14 @@ class CameraController(private val context: Context) {
         val lenses = mutableSetOf<CameraLens>()
         lenses.add(CameraLens.WIDE) // 标准后摄始终可用
 
-        android.util.Log.i(TAG, "===== 开始检测镜头 =====")
+        DebugLog.i(TAG, "===== 开始检测镜头 =====")
 
         // 收集所有可探测的相机信息
         val allCameraChars = mutableMapOf<String, android.hardware.camera2.CameraCharacteristics>()
 
         // 第一阶段：从 cameraIdList 收集
         val visibleIds = cameraManager.cameraIdList.toList()
-        android.util.Log.i(TAG, "cameraIdList（系统可见）: $visibleIds")
+        DebugLog.i(TAG, "cameraIdList（系统可见）: $visibleIds")
         for (cameraId in visibleIds) {
             try {
                 allCameraChars[cameraId] = cameraManager.getCameraCharacteristics(cameraId)
@@ -140,7 +141,7 @@ class CameraController(private val context: Context) {
             // 前置摄像头
             if (facing == CameraCharacteristics.LENS_FACING_FRONT) {
                 lenses.add(CameraLens.FRONT)
-                android.util.Log.i(TAG, "检测到前置摄像头: $cameraId")
+                DebugLog.i(TAG, "检测到前置摄像头: $cameraId")
             }
 
             // 后置超广角（焦距 < 4mm）
@@ -151,7 +152,7 @@ class CameraController(private val context: Context) {
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
                     val physicalIds = chars.physicalCameraIds
                     if (physicalIds.isNotEmpty()) {
-                        android.util.Log.i(TAG, "相机 $cameraId 的物理子相机: $physicalIds")
+                        DebugLog.i(TAG, "相机 $cameraId 的物理子相机: $physicalIds")
                     }
                     for (physicalId in physicalIds) {
                         try {
@@ -159,7 +160,7 @@ class CameraController(private val context: Context) {
                             logCameraInfo("物理子相机", physicalId, physicalChars)
                             checkFocalLengthForUltraWide(physicalChars, lenses)
                         } catch (e: Exception) {
-                            android.util.Log.w(
+                            DebugLog.w(
                                 TAG, "无法查询物理子相机 $physicalId: ${e.javaClass.simpleName}: ${e.message}"
                             )
                         }
@@ -175,7 +176,7 @@ class CameraController(private val context: Context) {
         }
 
         _availableLenses.value = lenses.toList()
-        android.util.Log.i(TAG, "===== 检测完成，可用镜头: ${lenses.toList()} =====")
+        DebugLog.i(TAG, "===== 检测完成，可用镜头: ${lenses.toList()} =====")
     }
 
     /**
@@ -200,10 +201,10 @@ class CameraController(private val context: Context) {
             // 用 selector 内部的 filter 逻辑检查是否有匹配的相机
             val matched = selector.filter(cameraInfos)
             if (matched.isEmpty()) {
-                android.util.Log.w(TAG, "镜头 ${lens.name} 在 CameraX 中无匹配相机，移除")
+                DebugLog.w(TAG, "镜头 ${lens.name} 在 CameraX 中无匹配相机，移除")
                 iterator.remove()
             } else {
-                android.util.Log.i(TAG, "镜头 ${lens.name} 验证通过，匹配 ${matched.size} 个相机")
+                DebugLog.i(TAG, "镜头 ${lens.name} 验证通过，匹配 ${matched.size} 个相机")
             }
         }
     }
@@ -224,7 +225,7 @@ class CameraController(private val context: Context) {
             CameraCharacteristics.LENS_FACING_EXTERNAL -> "EXTERNAL"
             else -> "UNKNOWN($facing)"
         }
-        android.util.Log.i(
+        DebugLog.i(
             TAG, "[$source] 相机 $cameraId: facing=$facingLabel, focalLengths=${focalLengths?.toList()}"
         )
     }

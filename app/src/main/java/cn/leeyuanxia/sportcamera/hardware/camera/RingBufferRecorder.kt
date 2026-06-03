@@ -3,7 +3,7 @@ package cn.leeyuanxia.sportcamera.hardware.camera
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
-import android.util.Log
+import cn.leeyuanxia.sportcamera.util.DebugLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -83,8 +83,15 @@ class RingBufferRecorder(
     @Volatile
     private var encoder: MediaCodec? = null
 
-    /** SPS/PPS 配置数据（每个 MP4 文件开头需要） */
-    private var csdData: ByteArray? = null
+    /** 编码器输出格式中的 CSD-0（SPS），从 INFO_OUTPUT_FORMAT_CHANGED 提取 */
+    @Volatile
+    var csd0Data: ByteArray? = null
+        private set
+
+    /** 编码器输出格式中的 CSD-1（PPS），从 INFO_OUTPUT_FORMAT_CHANGED 提取 */
+    @Volatile
+    var csd1Data: ByteArray? = null
+        private set
 
     /**
      * 准备编码器（ByteBuffer 输入模式）
@@ -131,7 +138,7 @@ class RingBufferRecorder(
         if (!isPrepared) throw IllegalStateException("RingBufferRecorder 未 prepare")
         encoder?.start()
         isRunning = true
-        Log.d(TAG, "编码器已启动: ${width}x${height} @${fps}fps, ${bitrateBps/1000}kbps, 环形缓冲${maxDurationSec}s")
+        DebugLog.d(TAG, "编码器已启动: ${width}x${height} @${fps}fps, ${bitrateBps/1000}kbps, 环形缓冲${maxDurationSec}s")
     }
 
     private var feedCount = 0L
@@ -163,7 +170,7 @@ class RingBufferRecorder(
                 )
                 feedCount++
                 if (feedCount % 150 == 0L) {
-                    Log.d(TAG, "已喂帧: $feedCount, 丢弃: $dropCount, 缓冲帧数: ${buffer.size}")
+                    DebugLog.d(TAG, "已喂帧: $feedCount, 丢弃: $dropCount, 缓冲帧数: ${buffer.size}")
                 }
             } else {
                 dropCount++
@@ -172,7 +179,7 @@ class RingBufferRecorder(
         } catch (e: Exception) {
             dropCount++
             if (dropCount <= 3 || dropCount % 100 == 1L) {
-                Log.w(TAG, "喂帧异常 (丢弃#${dropCount}, 类型=${e.javaClass.simpleName}): ${e.message}", e)
+                DebugLog.w(TAG, "喂帧异常 (丢弃#${dropCount}, 类型=${e.javaClass.simpleName}): ${e.message}", e)
             }
         }
     }
@@ -187,7 +194,7 @@ class RingBufferRecorder(
         val bufferInfo = MediaCodec.BufferInfo()
         var drainCount = 0L
 
-        Log.d(TAG, "drainEncoder 开始")
+        DebugLog.d(TAG, "drainEncoder 开始")
         try {
             while (isRunning) {
                 val outputIndex = codec.dequeueOutputBuffer(bufferInfo, 10_000)
@@ -199,9 +206,9 @@ class RingBufferRecorder(
                         outputBuffer.position(bufferInfo.offset)
                         outputBuffer.get(data)
 
-                        // 保存 CSD（SPS/PPS）配置帧
+                        // CSD 帧同时记录（兜底，优先用 outputFormat 提取的数据）
                         if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
-                            csdData = data
+                            if (csd0Data == null) csd0Data = data
                         }
 
                         addToRingBuffer(EncodedFrame(
@@ -213,22 +220,37 @@ class RingBufferRecorder(
                     }
                     codec.releaseOutputBuffer(outputIndex, false)
                     if (drainCount == 1L || drainCount % 150 == 0L) {
-                        Log.d(TAG, "已 drain: $drainCount 帧, 缓冲大小: ${buffer.size}, 字节: $currentBytes")
+                        DebugLog.d(TAG, "已 drain: $drainCount 帧, 缓冲大小: ${buffer.size}, 字节: $currentBytes")
                     }
                 }
                 outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> delay(1)
-                // INFO_OUTPUT_FORMAT_CHANGED → 忽略，我们用固定格式
+                outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    // 从输出格式中提取 csd-0 (SPS) 和 csd-1 (PPS)
+                    // 这是 MediaMuxer 合成 MP4 所需的编解码器特定数据
+                    try {
+                        val format = codec.outputFormat
+                        format.getByteBuffer("csd-0")?.let {
+                            csd0Data = ByteArray(it.remaining())
+                            it.get(csd0Data!!)
+                        }
+                        format.getByteBuffer("csd-1")?.let {
+                            csd1Data = ByteArray(it.remaining())
+                            it.get(csd1Data!!)
+                        }
+                        DebugLog.d(TAG, "CSD 已提取: csd-0=${csd0Data?.size ?: 0}B, csd-1=${csd1Data?.size ?: 0}B")
+                    } catch (_: Exception) {}
+                }
             }
         }
         } catch (e: Exception) {
             // 协程取消是正常行为（如 onWakeWordDetected 取消 drainJob），不作为错误
             if (e is kotlinx.coroutines.CancellationException) {
-                Log.d(TAG, "drainEncoder 被取消 (已 drain ${drainCount} 帧)")
+                DebugLog.d(TAG, "drainEncoder 被取消 (已 drain ${drainCount} 帧)")
             } else {
-                Log.w(TAG, "drainEncoder 异常退出 (drain了${drainCount}帧): ${e.message}")
+                DebugLog.w(TAG, "drainEncoder 异常退出 (drain了${drainCount}帧): ${e.message}")
             }
         }
-        Log.d(TAG, "drainEncoder 结束, 总计 drain: $drainCount 帧")
+        DebugLog.d(TAG, "drainEncoder 结束, 总计 drain: $drainCount 帧")
     }
 
     /**
@@ -271,9 +293,9 @@ class RingBufferRecorder(
     }
 
     /**
-     * 获取 CSD（SPS/PPS）配置数据
+     * 获取 CSD-0（SPS）配置数据，优先从 outputFormat 提取
      */
-    fun getCsdData(): ByteArray? = csdData
+    fun getCsdData(): ByteArray? = csd0Data
 
     /** 清空环形缓冲 */
     fun clear() {
@@ -301,6 +323,7 @@ class RingBufferRecorder(
     fun release() {
         stop()
         clear()
-        csdData = null
+        csd0Data = null
+        csd1Data = null
     }
 }

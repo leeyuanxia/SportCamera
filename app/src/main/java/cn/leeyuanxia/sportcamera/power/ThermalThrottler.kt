@@ -2,7 +2,7 @@ package cn.leeyuanxia.sportcamera.power
 
 import android.content.Context
 import android.os.PowerManager
-import android.util.Log
+import cn.leeyuanxia.sportcamera.util.DebugLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -72,7 +72,7 @@ class ThermalThrottler(private val context: Context) {
             val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
             pm.removeThermalStatusListener { }
         } catch (e: Exception) {
-            Log.w(TAG, "移除热管理监听器失败: ${e.message}")
+            DebugLog.w(TAG, "移除热管理监听器失败: ${e.message}")
         }
     }
 }
