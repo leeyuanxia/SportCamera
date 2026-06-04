@@ -79,8 +79,8 @@ fun StatusBar(
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Medium,
                 )
-                // 缩放倍率指示（仅非 1.0x 时显示）
-                if (zoomRatio > 1.05f) {
+                // 缩放倍率指示（非标准 1.0x 时显示，包括超广角 0.5x）
+                if (kotlin.math.abs(zoomRatio - 1.0f) > 0.05f) {
                     Spacer(Modifier.width(8.dp))
                     Box(
                         modifier = Modifier
@@ -128,7 +128,15 @@ fun StatusBar(
             ) {
                 CameraLens.entries.forEach { lens ->
                     val isAvailable = lens in availableLenses
-                    val isSelected = lens == currentLens && isAvailable
+                    // 镜头选中状态：直接绑定的看 currentLens，缩放中的看 zoomRatio
+                    val isSelected = when {
+                        !isAvailable -> false
+                        currentLens == CameraLens.FRONT -> lens == CameraLens.FRONT
+                        currentLens == CameraLens.ULTRA_WIDE -> lens == CameraLens.ULTRA_WIDE
+                        lens == CameraLens.ULTRA_WIDE -> zoomRatio < 0.95f
+                        lens == CameraLens.WIDE -> zoomRatio >= 0.95f
+                        else -> lens == currentLens
+                    }
 
                     Box(
                         modifier = Modifier

@@ -56,13 +56,13 @@ class VoiceTriggerRecorder(
         private const val TAG = "VoiceTrigger"
     }
 
-    /** PreviewView 引用，Surface 模式下需要传给 CameraController 绑定 Camera2 */
+    /** TextureView 引用，Surface 模式下需要传给 CameraController 绑定 Camera2 */
     @Volatile
-    private var previewView: androidx.camera.view.PreviewView? = null
+    private var previewTextureView: android.view.TextureView? = null
 
-    /** 设置 PreviewView 引用（由 CameraViewModel.bindCamera() 时调用） */
-    fun setPreviewView(pv: androidx.camera.view.PreviewView?) {
-        previewView = pv
+    /** 设置 TextureView 引用（由 CameraViewModel.bindCamera() 时调用） */
+    fun setTextureView(tv: android.view.TextureView?) {
+        previewTextureView = tv
     }
 
     private val _appState = MutableStateFlow<AppState>(AppState.Idle)
@@ -125,27 +125,46 @@ class VoiceTriggerRecorder(
         // 获取 WakeLock：保持 CPU 运行，允许屏幕关闭（最省电的 WakeLock 类型）
         powerStateManager.acquireStandbyWakeLock()
 
-        // 判断是否需要 Surface 模式（4K@60fps）
-        val needsSurfaceMode = currentProfile.width >= 3840 && currentProfile.fps > 30
+        // 判断是否需要 Surface 模式（4K@60fps 或 物理相机直连模式）
+        val isPhysicalCamera = cameraController.isPhysicalCameraMode
+        val needsSurfaceMode = (currentProfile.width >= 3840 && currentProfile.fps > 30) || isPhysicalCamera
 
         if (needsSurfaceMode) {
-            // ---- Surface 模式（4K@60fps） ----
+            // ---- Surface 模式（4K@60fps 或 物理相机直连） ----
             // 编码器使用 Surface 输入，相机通过 Camera2 API 直接输出到编码器 Surface
             // CameraFramePipeline 不参与编码数据流
             preRecordManager.encoderSurfaceReady = { surface ->
                 // 编码器 Surface 创建完成，通知 CameraController 切换到 Camera2 模式
                 scope.launch {
-                    val pv = previewView
-                    if (pv != null) {
+                    val tv = previewTextureView
+                    if (tv != null) {
                         try {
-                            cameraController.bindPreviewWithSurface(
-                                previewView = pv,
-                                lens = cameraController.currentLens.value,
-                                fps = thermalThrottler.config.value.preRecordFps,
-                                encoderSurface = surface,
-                            )
+                            if (isPhysicalCamera) {
+                                // 物理相机直连模式：用已知的物理相机 ID 重新绑定 + encoder Surface
+                                val physicalCameraId = cameraController.physicalCameraIdsMap[cameraController.currentLens.value]
+                                if (physicalCameraId != null) {
+                                    cameraController.stopPhysicalCamera()
+                                    cameraController.bindPhysicalCamera(
+                                        cameraId = physicalCameraId,
+                                        textureView = tv,
+                                        fps = thermalThrottler.config.value.preRecordFps,
+                                        encoderSurface = surface,
+                                    )
+                                    DebugLog.d(TAG, "物理相机 Surface 模式绑定成功: cameraId=$physicalCameraId")
+                                } else {
+                                    throw IllegalStateException("物理相机 ID 为 null")
+                                }
+                            } else {
+                                // 4K@60fps Surface 模式
+                                cameraController.bindPreviewWithSurface(
+                                    textureView = tv,
+                                    lens = cameraController.currentLens.value,
+                                    fps = thermalThrottler.config.value.preRecordFps,
+                                    encoderSurface = surface,
+                                )
+                                DebugLog.d(TAG, "Camera2 Surface 模式绑定成功")
+                            }
                             framePipeline.setSurfaceMode(true)
-                            DebugLog.d(TAG, "Camera2 Surface 模式绑定成功")
                         } catch (e: Exception) {
                             DebugLog.e(TAG, "Camera2 Surface 模式绑定失败: ${e.message}", e)
                             // 降级：Surface 模式失败，回退到 ByteBuffer 模式
@@ -154,15 +173,16 @@ class VoiceTriggerRecorder(
                             framePipeline.setTargetFps(thermalThrottler.config.value.preRecordFps)
                         }
                     } else {
-                        DebugLog.e(TAG, "PreviewView 为 null，无法绑定 Camera2 Surface 模式")
+                        DebugLog.e(TAG, "TextureView 为 null，无法绑定 Camera2 Surface 模式")
                     }
                 }
             }
             // 关键：Surface 模式下帧不经过 pipeline，无法通过 feedFrame 触发编码器创建
             // 必须主动创建编码器，获取 encoder Surface 后才能绑定 Camera2
-            preRecordManager.createSurfaceEncoder()
+            // 物理相机模式需要 forceSurfaceInput=true（非 4K 分辨率也需要 Surface 输入）
+            preRecordManager.createSurfaceEncoder(forceSurfaceInput = isPhysicalCamera)
             framePipeline.setSurfaceMode(true)
-            DebugLog.d(TAG, "预录管线已连接（Surface 模式），编码器主动创建完成")
+            DebugLog.d(TAG, "预录管线已连接（Surface 模式），编码器主动创建完成, isPhysicalCamera=$isPhysicalCamera")
         } else {
             // ---- ByteBuffer 模式（非 4K@60fps） ----
             // 现有逻辑完全不变
@@ -215,17 +235,17 @@ class VoiceTriggerRecorder(
             thermalThrottler.config.collect { config ->
                 DebugLog.d(TAG, "热管理配置更新: fps=${config.preRecordFps}, bitrate=${config.preRecordBitrateBps}, kwsInterval=${config.kwsReadIntervalMs}ms")
                 preRecordManager.updateThrottleConfig(config)
-                // ByteBuffer 模式下通过 pipeline 节流
-                if (!cameraController.isSurfaceMode) {
+                // ByteBuffer 模式下通过 pipeline 节流（Surface/物理相机模式通过 AE FPS Range 控制）
+                if (!cameraController.isSurfaceMode && !cameraController.isPhysicalCameraMode) {
                     framePipeline.setTargetFps(config.preRecordFps)
                 }
                 kwsManager.updateReadInterval(config.kwsReadIntervalMs)
             }
         }
 
-        // Surface 模式热管理：帧率变更通过 AE FPS Range 控制
+        // Surface 模式热管理：帧率变更通过 AE FPS Range 控制（4K@60fps 和物理相机模式共用）
         thermalThrottler.onSurfaceFpsChanged = { fps ->
-            if (cameraController.isSurfaceMode) {
+            if (cameraController.isSurfaceMode || cameraController.isPhysicalCameraMode) {
                 cameraController.updateSurfaceFps(fps)
             }
         }

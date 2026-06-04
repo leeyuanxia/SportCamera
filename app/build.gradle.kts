@@ -83,16 +83,11 @@ dependencies {
     implementation(libs.compose.material.icons)
     debugImplementation(libs.compose.ui.tooling)
 
-    // CameraX
-    implementation(libs.camerax.core)
-    implementation(libs.camerax.camera2)
-    implementation(libs.camerax.lifecycle)
-    implementation(libs.camerax.video)
-    implementation(libs.camerax.view)
+    // CameraX（已迁移到 Camera2，不再需要）
+    // Camera2 API 通过 Android SDK 内置提供，无需额外依赖
 
     // Kotlin 协程
     implementation(libs.kotlinx.coroutines.android)
-    implementation(libs.kotlinx.coroutines.guava)
 
     // DataStore 设置持久化
     implementation(libs.androidx.datastore.preferences)

@@ -1,6 +1,5 @@
 package cn.leeyuanxia.sportcamera.ui.component
 
-import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
@@ -15,32 +14,30 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.compose.LocalLifecycleOwner
+import android.view.TextureView
 import cn.leeyuanxia.sportcamera.domain.model.RecordOrientation
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * CameraX PreviewView 的 Compose 封装
+ * TextureView 相机预览的 Compose 封装
  *
  * 屏幕方向由 MainScreen 通过 Activity.requestedOrientation 动态控制。
  *
  * @param isVisible 预览是否可见。不可见时用全黑覆盖（OLED 不发光省电），
- *   CameraX 内部仍保持绑定不断流。
+ *   Camera2 会话仍保持不断流。
  */
 @Composable
 fun CameraPreview(
     modifier: Modifier = Modifier,
     orientation: RecordOrientation = RecordOrientation.PORTRAIT,
     isVisible: Boolean = true,
-    onBindCamera: suspend (PreviewView, LifecycleOwner, RecordOrientation) -> Unit,
+    onBindCamera: suspend (TextureView, RecordOrientation) -> Unit,
 ) {
-    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
 
-    var previewView by remember { mutableStateOf<PreviewView?>(null) }
+    var textureView by remember { mutableStateOf<TextureView?>(null) }
 
     val configuration = LocalConfiguration.current
 
@@ -50,10 +47,8 @@ fun CameraPreview(
     ) {
         AndroidView(
             factory = { ctx ->
-                PreviewView(ctx).also {
-                    it.scaleType = PreviewView.ScaleType.FILL_CENTER
-                    it.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                    previewView = it
+                TextureView(ctx).also {
+                    textureView = it
                 }
             },
         )
@@ -64,12 +59,12 @@ fun CameraPreview(
         }
     }
 
-    LaunchedEffect(previewView, configuration.orientation) {
-        val pv = previewView ?: return@LaunchedEffect
+    LaunchedEffect(textureView, configuration.orientation) {
+        val tv = textureView ?: return@LaunchedEffect
         scope.launch {
             withContext(NonCancellable) {
                 try {
-                    onBindCamera(pv, lifecycleOwner, orientation)
+                    onBindCamera(tv, orientation)
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }

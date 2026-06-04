@@ -1,14 +1,14 @@
 package cn.leeyuanxia.sportcamera.hardware.camera
 
+import android.media.Image
+import android.media.ImageReader
 import cn.leeyuanxia.sportcamera.util.DebugLog
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.ImageProxy
 
 /**
- * 摄像头帧管线 — 连接 CameraX ImageAnalysis 和编码器
+ * 摄像头帧管线 — 连接 Camera2 ImageReader 和编码器
  *
  * 数据流：
- * CameraX ImageAnalysis → CameraFramePipeline.analyze()
+ * Camera2 ImageReader → CameraFramePipeline.onImageAvailable()
  *   → YUV_420_888 转 NV12 → feedFrame() 送入当前编码器
  *
  * 性能优化：
@@ -16,7 +16,7 @@ import androidx.camera.core.ImageProxy
  * - 缓冲区复用：fullNv12Buffer / scaledNv12Buffer 避免每帧分配 ~16MB
  * - 居中裁剪：保持宽高比，不拉伸变形
  */
-class CameraFramePipeline : ImageAnalysis.Analyzer {
+class CameraFramePipeline : ImageReader.OnImageAvailableListener {
 
     companion object {
         private const val TAG = "CameraFramePipeline"
@@ -41,7 +41,7 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
     private var discardedCount = 0L
     private var fedFrameCount = 0L
 
-    // 可复用的 NV12 缓冲区（analyze() 在单线程执行，无需同步）
+    // 可复用的 NV12 缓冲区（onImageAvailable 在 Camera2 HandlerThread 执行，无需同步）
     // 消除每帧 ~16MB 的 ByteArray 分配 → 消除 GC 停顿
     private var fullNv12Buffer: ByteArray? = null
     private var scaledNv12Buffer: ByteArray? = null
@@ -55,7 +55,7 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
         DebugLog.d(TAG, "目标编码尺寸: ${width}x${height}")
     }
 
-    // 摄像头实际输出帧率（由 CameraController 通过 Camera2 interop 设置后通知）
+    // 摄像头实际输出帧率（由 CameraController 通过 Camera2 设置后通知）
     @Volatile
     private var cameraFps: Int = 30
 
@@ -63,7 +63,8 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
      * 是否处于 Surface 模式（4K@60fps）
      *
      * Surface 模式下 Camera2 直接输出到编码器 Surface，
-     * ImageAnalysis 不参与编码数据流，analyze() 直接跳过。
+     * ImageReader 不参与编码数据流，onImageAvailable 不会被触发，
+     * 此检查仅为防御性编码。
      */
     @Volatile
     private var surfaceMode: Boolean = false
@@ -80,7 +81,7 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
      * 设置摄像头实际输出帧率
      *
      * 由 CameraController 在每次 bindPreview 时同步传入，
-     * 与 Camera2 interop 设置的 CONTROL_AE_TARGET_FPS_RANGE 保持一致。
+     * 与 Camera2 CONTROL_AE_TARGET_FPS_RANGE 保持一致。
      */
     fun setCameraFps(fps: Int) {
         cameraFps = fps
@@ -115,19 +116,22 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
     }
 
     /**
-     * ImageAnalysis.Analyzer 实现
+     * ImageReader.OnImageAvailableListener 实现
+     *
+     * Camera2 ImageReader 输出的帧通过此回调进入编码管线。
+     * acquireLatestImage() 自动丢弃旧帧，等价于 CameraX 的 STRATEGY_KEEP_ONLY_LATEST。
      *
      * 高分辨率（4K）路径：使用 feedFrameDirect 零拷贝，YUV 转换直接写入编码器缓冲区，
      * 省去 ~12MB 的 ByteArray 中转，将每帧处理时间减少 3-4ms。
      */
-    override fun analyze(image: ImageProxy) {
+    override fun onImageAvailable(reader: ImageReader) {
         totalFrameCount++
 
         // Surface 模式（4K@60fps）下编码器由 Camera2 直接喂帧，
-        // ImageAnalysis 不参与编码数据流。此回调不会被触发（无 ImageAnalysis use case），
+        // ImageReader 不参与编码数据流。此回调不会被触发（无 ImageReader），
         // 此检查仅为防御性编码。
         if (surfaceMode) {
-            image.close()
+            reader.acquireLatestImage()?.close()
             return
         }
 
@@ -137,7 +141,7 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
             if (discardedCount % 15 == 1L) {
                 DebugLog.d(TAG, "无编码器，丢弃帧 (总接收: $totalFrameCount, 累计丢弃: $discardedCount)")
             }
-            image.close()
+            reader.acquireLatestImage()?.close()
             return
         }
 
@@ -145,19 +149,16 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
         if (skipPattern > 1) {
             frameCounter++
             if (frameCounter % skipPattern != 0L) {
-                image.close()
+                reader.acquireLatestImage()?.close()
                 return
             }
         }
 
-        try {
-            val proxyImage = image.image ?: run {
-                discardedCount++
-                image.close()
-                return
-            }
+        val image: Image? = reader.acquireLatestImage()
+        if (image == null) return
 
-            val timestampUs = image.imageInfo.timestamp / 1000
+        try {
+            val timestampUs = image.timestamp / 1000
             var frameW = image.width
             var frameH = image.height
 
@@ -166,13 +167,13 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
             val needResize = targetWidth > 0 && targetHeight > 0
                 && (frameW != targetWidth || frameH != targetHeight)
 
-            // 诊断日志：前10帧记录相机实际分辨率与目标分辨率对比
+            // 诊断日志：前5帧记录相机实际分辨率与目标分辨率对比
             if (fedFrameCount < 5) {
                 DebugLog.d(TAG, "帧诊断: 相机=${frameW}x${frameH}, 目标=${targetWidth}x${targetHeight}, needResize=$needResize")
             }
 
             if (!needResize && frameW >= 3840) {
-                val success = encoder.feedFrameDirect(proxyImage, timestampUs, frameW, frameH)
+                val success = encoder.feedFrameDirect(image, timestampUs, frameW, frameH)
                 if (success) {
                     fedFrameCount++
                     if (fedFrameCount % 150 == 0L) {
@@ -183,7 +184,7 @@ class CameraFramePipeline : ImageAnalysis.Analyzer {
             }
 
             // ---- 普通路径：YUV → ByteArray → 编码器 ----
-            var nv12 = YuvConverter.imageToNv12(proxyImage, fullNv12Buffer)
+            var nv12 = YuvConverter.imageToNv12(image, fullNv12Buffer)
             fullNv12Buffer = nv12
 
             if (needResize) {

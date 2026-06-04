@@ -89,9 +89,9 @@ class SettingsRepository(private val context: Context) {
         }
     }
 
-    /** 视频防抖（EIS），默认开启 */
+    /** 视频防抖（EIS），默认关闭（EIS 会裁切传感器 ~10-15%，降低 FOV） */
     val videoStabilization: Flow<Boolean> = context.dataStore.data.map { prefs ->
-        prefs[KEY_VIDEO_STABILIZATION] ?: true
+        prefs[KEY_VIDEO_STABILIZATION] ?: false
     }
 
     /** 设置视频防抖 */

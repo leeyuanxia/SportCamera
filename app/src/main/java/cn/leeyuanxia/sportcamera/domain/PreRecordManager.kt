@@ -84,7 +84,7 @@ class PreRecordManager : FrameConsumer {
      *
      * 调用时机：VoiceTriggerRecorder.enterStandby() 中 Surface 模式分支
      */
-    fun createSurfaceEncoder() {
+    fun createSurfaceEncoder(forceSurfaceInput: Boolean = false) {
         if (drainStarted) {
             DebugLog.d(TAG, "createSurfaceEncoder: 编码器已存在，跳过")
             return
@@ -102,6 +102,7 @@ class PreRecordManager : FrameConsumer {
             w, h,
             fps = config?.preRecordFps ?: currentProfile.fps,
             bitrateBps = config?.preRecordBitrateBps ?: currentProfile.bitrateBps,
+            forceSurfaceInput = forceSurfaceInput,
         )
     }
 
@@ -119,13 +120,14 @@ class PreRecordManager : FrameConsumer {
      * - 分辨率：相机实际输出（cameraWidth × cameraHeight），与用户选择的 profile 一致
      * - fps/bitrate：默认使用 currentProfile（用户选择），热管理降级时由 throttleConfig 覆盖
      */
-    private fun createBuffer(w: Int, h: Int, fps: Int, bitrateBps: Int) {
+    private fun createBuffer(w: Int, h: Int, fps: Int, bitrateBps: Int, forceSurfaceInput: Boolean = false) {
         val oldBuffer = ringBuffer
         val recorder = RingBufferRecorder(
             maxDurationSec = currentDuration.seconds,
             width = w, height = h,
             fps = fps,
             bitrateBps = bitrateBps,
+            forceSurfaceInput = forceSurfaceInput,
         )
 
         if (recorder.useSurfaceInput) {

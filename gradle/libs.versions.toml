@@ -5,7 +5,6 @@ coreKtx = "1.16.0"
 lifecycle = "2.9.1"
 activityCompose = "1.10.1"
 composeBom = "2025.06.00"
-cameraX = "1.4.1"
 coroutines = "1.10.2"
 datastore = "1.1.7"
 
@@ -23,14 +22,7 @@ compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
 compose-material3 = { group = "androidx.compose.material3", name = "material3" }
 compose-material-icons = { group = "androidx.compose.material", name = "material-icons-extended" }
 
-camerax-core = { group = "androidx.camera", name = "camera-core", version.ref = "cameraX" }
-camerax-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "cameraX" }
-camerax-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "cameraX" }
-camerax-video = { group = "androidx.camera", name = "camera-video", version.ref = "cameraX" }
-camerax-view = { group = "androidx.camera", name = "camera-view", version.ref = "cameraX" }
-
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
-kotlinx-coroutines-guava = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-guava", version.ref = "coroutines" }
 androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
 
 junit = { group = "junit", name = "junit", version = "4.13.2" }

@@ -76,6 +76,8 @@ fun MainScreen(viewModel: CameraViewModel) {
     val eisSupported by viewModel.eisSupported.collectAsState()
     val zoomRatio by viewModel.zoomRatio.collectAsState()
     val maxZoomRatio by viewModel.maxZoomRatio.collectAsState()
+    val minZoomRatio by viewModel.minZoomRatio.collectAsState()
+    val isPhysicalCameraMode by viewModel.isPhysicalCameraMode.collectAsState()
 
     val context = LocalContext.current
     val activity = context as? ComponentActivity
@@ -134,10 +136,12 @@ fun MainScreen(viewModel: CameraViewModel) {
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black)
-                // 双指捏合缩放：在预览画面上控制缩放倍率
-                .pointerInput(maxZoomRatio) {
+                // 双指捏合缩放：在预览画面上控制缩放倍率（物理相机模式下禁用）
+                .pointerInput(minZoomRatio, maxZoomRatio, isPhysicalCameraMode) {
                     detectTransformGestures { _, _, zoomChange, _ ->
-                        if (zoomChange != 1.0f && maxZoomRatio > 1.0f) {
+                        if (isPhysicalCameraMode) return@detectTransformGestures
+                        // 允许缩放：有放大空间 (maxZoomRatio > 1.0) 或有超广角空间 (minZoomRatio < 1.0)
+                        if (zoomChange != 1.0f && (maxZoomRatio > 1.0f || minZoomRatio < 1.0f)) {
                             // 阻尼：将原始变化量向 1.0 压缩，手势更细腻
                             val damped = 1.0f + (zoomChange - 1.0f) * 0.4f
                             viewModel.applyZoomDelta(damped)
@@ -150,7 +154,7 @@ fun MainScreen(viewModel: CameraViewModel) {
                 },
         ) {
             // Layer 1: 相机预览（条件显示）
-            // 不论是否可见，CameraPreview 始终存在（保持 CameraX 绑定）
+            // 不论是否可见，CameraPreview 始终存在（保持 Camera2 会话）
             // 通过 alpha 控制可见性，隐藏时完全透明（OLED 不发光）
             CameraPreview(
                 modifier = Modifier
@@ -160,8 +164,8 @@ fun MainScreen(viewModel: CameraViewModel) {
                         else Modifier.background(Color.Black) // 隐藏时用黑底覆盖
                     ),
                 orientation = recordOrientation,
-                onBindCamera = { previewView, lifecycleOwner, orientation ->
-                    viewModel.bindCamera(lifecycleOwner, previewView, orientation)
+                onBindCamera = { textureView, orientation ->
+                    viewModel.bindCamera(textureView, orientation)
                 },
                 isVisible = previewVisible,
             )

@@ -7,6 +7,7 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import cn.leeyuanxia.sportcamera.util.DebugLog
+import android.view.TextureView
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import cn.leeyuanxia.sportcamera.di.AppContainer
@@ -19,7 +20,6 @@ import cn.leeyuanxia.sportcamera.domain.model.RecordOrientation
 import cn.leeyuanxia.sportcamera.domain.model.ResolutionProfile
 import cn.leeyuanxia.sportcamera.hardware.camera.CameraController
 import cn.leeyuanxia.sportcamera.hardware.camera.CameraFramePipeline
-import cn.leeyuanxia.sportcamera.hardware.camera.CameraLifecycleOwner
 import cn.leeyuanxia.sportcamera.hardware.audio.KwsManager
 import cn.leeyuanxia.sportcamera.hardware.storage.VideoStorageManager
 import cn.leeyuanxia.sportcamera.domain.PreRecordManager
@@ -50,7 +50,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     // 从 AppContainer 获取共享实例
     private val framePipeline = container.framePipeline
-    private val cameraLifecycleOwner = container.cameraLifecycleOwner
     private val kwsManager = container.kwsManager
     private val preRecordManager = container.preRecordManager
     private val storageManager = container.storageManager
@@ -105,6 +104,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     /** 最大缩放倍率 */
     val maxZoomRatio: StateFlow<Float> = cameraController.maxZoomRatio
+
+    /** 最小缩放倍率（超广角设备 < 1.0，如 0.5x） */
+    val minZoomRatio: StateFlow<Float> = cameraController.minZoomRatio
+
+    /** 是否处于物理相机直连模式（超广角/长焦，不支持缩放） */
+    val isPhysicalCameraMode: StateFlow<Boolean> = cameraController.isPhysicalCameraModeState
 
     /** 预览画面是否可见 — 待机时隐藏，录制时显示，支持 30s 窥视 */
     private val _previewVisible = MutableStateFlow(true)
@@ -201,19 +206,17 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
      * 绑定摄像头预览 + 帧分析
      */
     suspend fun bindCamera(
-        lifecycleOwner: androidx.lifecycle.LifecycleOwner,
-        previewView: androidx.camera.view.PreviewView,
+        textureView: TextureView,
         orientation: RecordOrientation,
     ) {
         val profile = resolutionProfile.value
         framePipeline.setTargetSize(profile.width, profile.height)
-        // 传递 PreviewView 引用给 VoiceTriggerRecorder（Surface 模式需要）
-        voiceTriggerRecorder.setPreviewView(previewView)
-        // 用 CameraLifecycleOwner 包装 Activity 生命周期
-        // 待机模式下拦截 Activity.onStop()，锁屏后相机持续采集
-        cameraLifecycleOwner.setWrappedOwner(lifecycleOwner)
+        // 传递 TextureView 引用给 VoiceTriggerRecorder（Surface 模式需要）
+        voiceTriggerRecorder.setTextureView(textureView)
         cameraController.bindPreview(
-            cameraLifecycleOwner, previewView, currentLens.value, orientation,
+            textureView = textureView,
+            lens = currentLens.value,
+            orientation = orientation,
             framePipeline = framePipeline,
             encoderWidth = profile.width,
             encoderHeight = profile.height,
@@ -223,8 +226,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun startStandby() {
-        // 先锁定相机生命周期为 STARTED，再进入待机
-        cameraLifecycleOwner.enterStandby()
         viewModelScope.launch {
             voiceTriggerRecorder.enterStandby()
             // Surface 模式可能已激活（4K@60fps），刷新 EIS 能力
@@ -234,8 +235,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun stopStandby() {
         voiceTriggerRecorder.stop()
-        // 退出待机后恢复 Activity 生命周期镜像
-        cameraLifecycleOwner.exitStandby()
         // 恢复预览和 UI
         _previewVisible.value = true
         _uiVisible.value = true
@@ -243,10 +242,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     /**
      * 切换预览窥视 — 再次点击立即关闭
-     *
-     * 仅在待机模式下有效：
-     * - 预览隐藏时 → 显示预览，30s 后自动关闭
-     * - 预览显示时 → 立即关闭预览，取消定时
      */
     fun peekPreview() {
         if (appState.value !is AppState.Standby) return
@@ -270,8 +265,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     /**
      * 切换 UI 叠加层可见性
-     *
-     * 隐藏所有 UI 控件 → OLED 全黑 → 最省电
      */
     fun toggleUi() {
         _uiVisible.value = !_uiVisible.value
@@ -286,8 +279,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     /**
      * 请求电池优化白名单
-     *
-     * 弹出系统对话框，用户同意后 App 不受电池优化限制。
      */
     fun requestBatteryOptimization(context: Context) {
         try {
@@ -305,7 +296,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             // 持久化设置
             settingsRepo.setCameraLens(lens)
-            // 实际切换摄像头（重新绑定 CameraX）
+            // 实际切换摄像头
             val switched = cameraController.switchLens(lens)
             if (switched != null) {
                 cameraController.refreshEisCapability()
@@ -318,8 +309,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     /**
      * 应用缩放增量（双指捏合时调用）
-     *
-     * @param delta 缩放倍率乘数（>1.0 放大，<1.0 缩小）
      */
     fun applyZoomDelta(delta: Float) {
         cameraController.applyZoomDelta(delta)
@@ -353,6 +342,5 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         super.onCleared()
         voiceTriggerRecorder.release()
         cameraController.release()
-        cameraLifecycleOwner.destroy()
     }
 }
