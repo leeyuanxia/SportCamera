@@ -98,6 +98,8 @@ class PreRecordManager : FrameConsumer {
         cameraWidth = w
         cameraHeight = h
         val config = throttleConfig
+        DebugLog.d(TAG, "createSurfaceEncoder: profile=${currentProfile.width}x${currentProfile.height}@${currentProfile.fps}fps, " +
+            "热管理 preRecordFps=${config?.preRecordFps}")
         createBuffer(
             w, h,
             fps = config?.preRecordFps ?: currentProfile.fps,

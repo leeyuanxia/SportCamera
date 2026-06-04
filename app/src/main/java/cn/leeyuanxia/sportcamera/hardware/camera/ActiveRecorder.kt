@@ -80,10 +80,13 @@ class ActiveRecorder(
                 MediaFormat.KEY_PROFILE,
                 MediaCodecInfo.CodecProfileLevel.AVCProfileHigh
             )
-            setInteger(
-                MediaFormat.KEY_LEVEL,
+            // 动态 Level 选择：4K@60fps 需要 Level 5.2，其他用 Level 4
+            val mbPerSec = (width / 16) * (height / 16) * fps
+            val avcLevel = if (mbPerSec > 1_000_000)
+                MediaCodecInfo.CodecProfileLevel.AVCLevel52
+            else
                 MediaCodecInfo.CodecProfileLevel.AVCLevel4
-            )
+            setInteger(MediaFormat.KEY_LEVEL, avcLevel)
         }
 
         encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {

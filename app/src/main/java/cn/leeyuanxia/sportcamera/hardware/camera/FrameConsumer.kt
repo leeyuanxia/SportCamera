@@ -171,7 +171,12 @@ object YuvConverter {
         }
     }
 
-    /** NV12 居中裁剪 + 缩放 */
+    /**
+     * NV12 居中裁剪 + 缩放（双线性插值）
+     *
+     * 使用 16.16 定点双线性插值替代最近邻，减少缩放时的锯齿和细节丢失。
+     * 性能开销约每帧额外 2-3ms（非 Surface 模式路径可接受）。
+     */
     fun cropAndScaleNv12(
         src: ByteArray, srcW: Int, srcH: Int,
         dstW: Int, dstH: Int, reuse: ByteArray? = null,
@@ -193,26 +198,72 @@ object YuvConverter {
         val dst = if (reuse != null && reuse.size == dstSize) reuse else ByteArray(dstSize)
         val xStep = (cropW shl 16) / dstW
         val yStep = (cropH shl 16) / dstH
+        val cropYBound = cropY + cropH - 1
+        val cropXBound = cropX + cropW - 1
 
+        // Y 平面 — 双线性插值（16.16 定点）
         for (y in 0 until dstH) {
-            val srcY = cropY + ((y * yStep) shr 16)
+            val srcYFixed = y * yStep
+            val srcY0 = cropY + (srcYFixed shr 16)
+            val srcY1 = if (srcY0 < cropYBound) srcY0 + 1 else cropYBound
+            val fy = (srcYFixed shr 8) and 0xFF
+            val rowOff0 = srcY0 * srcW + cropX
+            val rowOff1 = srcY1 * srcW + cropX
             for (x in 0 until dstW) {
-                dst[y * dstW + x] = src[(srcY * srcW + cropX) + ((x * xStep) shr 16)]
+                val srcXFixed = x * xStep
+                val srcX0 = cropX + (srcXFixed shr 16)
+                val srcX1 = if (srcX0 < cropXBound) srcX0 + 1 else cropXBound
+                val fx = (srcXFixed shr 8) and 0xFF
+                val v00 = src[rowOff0 + (srcX0 - cropX)].toInt() and 0xFF
+                val v01 = src[rowOff0 + (srcX1 - cropX)].toInt() and 0xFF
+                val v10 = src[rowOff1 + (srcX0 - cropX)].toInt() and 0xFF
+                val v11 = src[rowOff1 + (srcX1 - cropX)].toInt() and 0xFF
+                val top = v00 + ((v01 - v00) * fx shr 8)
+                val bot = v10 + ((v11 - v10) * fx shr 8)
+                dst[y * dstW + x] = (top + ((bot - top) * fy shr 8)).toByte()
             }
         }
+
+        // UV 平面 — 双线性插值（NV12 交织格式）
         val uvDstOff = dstW * dstH; val uvSrcOff = srcW * srcH
         val uvCropX = cropX / 2; val uvCropY = cropY / 2
         val uvCropW = cropW / 2; val uvCropH = cropH / 2
         val uvXStep = (uvCropW shl 16) / (dstW / 2)
         val uvYStep = (uvCropH shl 16) / (dstH / 2)
+        val uvCropYBound = uvCropY + uvCropH - 1
+        val uvCropXBound = uvCropX + uvCropW - 1
+
         for (y in 0 until dstH / 2) {
-            val srcY = uvCropY + ((y * uvYStep) shr 16)
-            val srcRowOff = uvSrcOff + srcY * srcW + uvCropX * 2
+            val srcYFixed = y * uvYStep
+            val srcY0 = uvCropY + (srcYFixed shr 16)
+            val srcY1 = if (srcY0 < uvCropYBound) srcY0 + 1 else uvCropYBound
+            val fy = (srcYFixed shr 8) and 0xFF
+            val rowOff0 = uvSrcOff + srcY0 * srcW + uvCropX * 2
+            val rowOff1 = uvSrcOff + srcY1 * srcW + uvCropX * 2
             val dstRowOff = uvDstOff + y * dstW
             for (x in 0 until dstW / 2) {
-                val si = srcRowOff + ((x * uvXStep) shr 16) * 2
-                val di = dstRowOff + x * 2
-                dst[di] = src[si]; dst[di + 1] = src[si + 1]
+                val srcXFixed = x * uvXStep
+                val srcX0 = uvCropX + (srcXFixed shr 16)
+                val srcX1 = if (srcX0 < uvCropXBound) srcX0 + 1 else uvCropXBound
+                val fx = (srcXFixed shr 8) and 0xFF
+                val dx = (srcX0 - uvCropX) * 2
+                val dx1 = (srcX1 - uvCropX) * 2
+                // U 分量
+                val u00 = src[rowOff0 + dx].toInt() and 0xFF
+                val u01 = src[rowOff0 + dx1].toInt() and 0xFF
+                val u10 = src[rowOff1 + dx].toInt() and 0xFF
+                val u11 = src[rowOff1 + dx1].toInt() and 0xFF
+                val uTop = u00 + ((u01 - u00) * fx shr 8)
+                val uBot = u10 + ((u11 - u10) * fx shr 8)
+                dst[dstRowOff + x * 2] = (uTop + ((uBot - uTop) * fy shr 8)).toByte()
+                // V 分量
+                val v00 = src[rowOff0 + dx + 1].toInt() and 0xFF
+                val v01 = src[rowOff0 + dx1 + 1].toInt() and 0xFF
+                val v10 = src[rowOff1 + dx + 1].toInt() and 0xFF
+                val v11 = src[rowOff1 + dx1 + 1].toInt() and 0xFF
+                val vTop = v00 + ((v01 - v00) * fx shr 8)
+                val vBot = v10 + ((v11 - v10) * fx shr 8)
+                dst[dstRowOff + x * 2 + 1] = (vTop + ((vBot - vTop) * fy shr 8)).toByte()
             }
         }
         return dst

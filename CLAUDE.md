@@ -220,6 +220,40 @@ adb logcat -s SportCameraLogger:D | grep -E "CameraController|Surface|Camera2"
 
 ## 修改日志
 
+### 2026-06-04：修复广角预览模糊 + 多项优化
+
+**修改文件：**
+- `hardware/camera/CameraController.kt` — FPS Range 策略统一、缩放范围初始化、rebuildCaptureRequest 行为修正
+- `viewmodel/CameraViewModel.kt` — 镜头选择启动恢复
+- `hardware/camera/FrameConsumer.kt` — cropAndScaleNv12 升级双线性插值
+- `hardware/camera/ActiveRecorder.kt` — AVC Level 动态选择
+
+**改动内容：**
+
+1. **广角预览模糊修复（根因）**：
+   - `bindLogicalCameraWithZoom` 和 `bindPhysicalCameraInternal`（预览模式）原先使用 `resolveSurfaceFpsRange()` 显式设置 `CONTROL_AE_TARGET_FPS_RANGE`，导致 HAL 切换到低分辨率传感器模式
+   - 改为使用 `resolveActualFpsFromCameraId()` 返回 null Range（与 WIDE 模式 `bindPreviewInternal` 一致），不设 FPS Range，HAL 使用默认值保持最佳画质
+   - `bindPhysicalCameraInternal` 在录制模式（`encoderSurface != null`）时仍设置宽 FPS Range 确保帧率正确
+   - 新增 `fpsRangeWasSetOnBind` 标志跟踪初始绑定策略，`rebuildCaptureRequest` 在缩放/EIS 切换时也遵循此策略
+   - 热管理 `updateSurfaceFps()` 显式传入 Range，不受此策略影响
+
+2. **缩放范围初始化补全**：
+   - `bindLogicalCameraWithZoom` 和 `bindPhysicalCameraInternal` 添加了缺失的 `initZoomFromCameraCharacteristics()` 调用
+
+3. **镜头选择启动恢复**：
+   - `CameraViewModel.bindCamera()` 读取 `SettingsRepository` 持久化的镜头选择
+   - 先绑定 WIDE 初始化缩放范围，再按持久化值 `switchLens` 恢复广角/长焦
+
+4. **cropAndScaleNv12 双线性插值升级 + 修复宽高比 Bug**：
+   - Y 平面和 UV 平面均从最近邻插值升级为 16.16 定点双线性插值
+   - 减少传感器分辨率→编码器目标分辨率缩放时的锯齿和细节丢失
+   - 修复 `dstAspect` 使用 `srcH` 而非 `dstH` 的 bug：原代码 `dstW/srcH`→修正为 `dstW/dstH`
+   - **该 bug 导致裁剪计算错误（srcH 当 dstH），画面被横向压缩**
+   - 每帧额外 ~2-3ms，非 Surface 模式路径可接受
+
+5. **ActiveRecorder AVC Level 动态选择**：
+   - 从硬编码 `AVCLevel4` 改为根据 `mbPerSec` 动态选择 Level（4K@60fps 使用 Level 5.2）
+
 ### 2026-06-03：新增长焦 (TELEPHOTO) 镜头支持（已移除）
 
 初始实现通过 TELEPHOTO 枚举 + CameraSelector 直接绑定长焦物理子相机，

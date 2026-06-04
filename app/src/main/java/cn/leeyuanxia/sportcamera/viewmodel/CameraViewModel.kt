@@ -31,6 +31,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -204,6 +205,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     /**
      * 绑定摄像头预览 + 帧分析
+     *
+     * 首次绑定时恢复用户上次保存的镜头选择。
+     * 先绑定 WIDE 初始化缩放范围，再按持久化值切换到广角/长焦。
      */
     suspend fun bindCamera(
         textureView: TextureView,
@@ -213,9 +217,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         framePipeline.setTargetSize(profile.width, profile.height)
         // 传递 TextureView 引用给 VoiceTriggerRecorder（Surface 模式需要）
         voiceTriggerRecorder.setTextureView(textureView)
+
+        // 先绑定 WIDE 初始化缩放范围（initZoomFromCameraCharacteristics 需要）
         cameraController.bindPreview(
             textureView = textureView,
-            lens = currentLens.value,
+            lens = CameraLens.WIDE,
             orientation = orientation,
             framePipeline = framePipeline,
             encoderWidth = profile.width,
@@ -223,6 +229,16 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             fps = profile.fps,
         )
         cameraController.refreshEisCapability()
+
+        // 恢复用户上次保存的镜头选择
+        val restoredLens = settingsRepo.cameraLens.first()
+        if (restoredLens != CameraLens.WIDE && restoredLens != CameraLens.FRONT) {
+            val switched = cameraController.switchLens(restoredLens)
+            if (switched != null) {
+                cameraController.refreshEisCapability()
+                DebugLog.d(TAG, "启动时恢复镜头: ${restoredLens.name}")
+            }
+        }
     }
 
     fun startStandby() {

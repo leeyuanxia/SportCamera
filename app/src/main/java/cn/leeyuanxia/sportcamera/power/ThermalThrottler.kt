@@ -83,6 +83,11 @@ class ThermalThrottler(private val context: Context) {
 
         // API 34+ addThermalStatusListener
         pm.addThermalStatusListener { status ->
+            DebugLog.d(TAG, "热状态变化: $currentThermalStatus→$status (ratio=${when(status) {
+                PowerManager.THERMAL_STATUS_NONE -> 1.0; PowerManager.THERMAL_STATUS_LIGHT -> 0.8
+                PowerManager.THERMAL_STATUS_MODERATE -> 0.667; PowerManager.THERMAL_STATUS_SEVERE -> 0.333
+                PowerManager.THERMAL_STATUS_CRITICAL -> 0.2; PowerManager.THERMAL_STATUS_EMERGENCY -> 0.133
+                else -> 0.067}})")
             currentThermalStatus = status
             recalculateConfig(status)
         }
@@ -102,8 +107,10 @@ class ThermalThrottler(private val context: Context) {
             else -> 1.0 // Normal / None
         }
 
-        val fps = maxOf(2, (profileFps * ratio).toInt())
+        // 预录帧率不低于 15fps，避免异常热状态导致帧率过低
+        val fps = maxOf(15, (profileFps * ratio).toInt())
         val bitrateBps = maxOf(200_000, (profileBitrateBps * ratio).toInt())
+        DebugLog.d(TAG, "热管理配置: status=$status, ratio=$ratio, profileFps=$profileFps→fps=$fps, bitrate=${bitrateBps/1000}kbps")
 
         // KWS 间隔不按比例，按热等级固定值（避免高频时延迟过大）
         val kwsIntervalMs = when (status) {

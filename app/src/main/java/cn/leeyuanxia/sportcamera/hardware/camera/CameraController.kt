@@ -67,6 +67,9 @@ class CameraController(private val context: Context) {
     private var lastAppliedFps: Int = 30
     private var lastRebindLens: CameraLens? = null
 
+    /** 初始绑定时是否设置了 AE FPS Range — rebuild 时保持一致 */
+    private var fpsRangeWasSetOnBind: Boolean = false
+
     // ---- Camera2 会话状态 ----
 
     /** Camera2 设备 */
@@ -370,7 +373,7 @@ class CameraController(private val context: Context) {
         val activeArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
         val sensorAspect = maxSensorSize.width.toFloat() / maxSensorSize.height
 
-        // 6. 预览分辨率 — 用 ~1080p 级别分辨率保证流畅，同一宽高比避免 HAL 拉伸
+        // 6. 预览分辨率 — ~5MP 固定，保证流畅和画质，同一宽高比避免 HAL 拉伸
         val previewSize = selectPreviewResolution(cameraId, sensorAspect)
         val previewSurface = configurePreviewSurface(textureView, previewSize.width, previewSize.height)
             ?: throw IllegalStateException("无法配置预览 Surface，请确保 TextureView 已就绪")
@@ -391,10 +394,12 @@ class CameraController(private val context: Context) {
             null
         }
 
-        // 7. 解析 FPS Range
-        val (actualFps, bestRange) = resolveActualFpsFromCameraId(cameraId, fps)
+        // 7. 解析 FPS Range — 设最宽范围确保帧率，同时给 HAL 灵活选择传感器模式
+        val (actualFps, _) = resolveActualFpsFromCameraId(cameraId, fps)
+        val previewRange = resolveSurfaceFpsRange(cameraId, fps)
         lastAppliedFps = actualFps
-        DebugLog.d(TAG, "请求帧率: ${fps}fps, 实际帧率: ${actualFps}fps, Range: $bestRange")
+        fpsRangeWasSetOnBind = true
+        DebugLog.d(TAG, "请求帧率: ${fps}fps, 实际帧率: ${actualFps}fps, 宽Range: [${previewRange.lower},${previewRange.upper}]")
 
         // 8. 打开 Camera2 设备
         val device = openCamera2Device(cameraManager, cameraId, handler)
@@ -411,9 +416,7 @@ class CameraController(private val context: Context) {
         //    TEMPLATE_RECORD 会应用内部裁切优化，导致 FOV 变窄
         val requestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             surfaces.forEach { addTarget(it) }
-            if (bestRange != null) {
-                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, bestRange)
-            }
+            set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, previewRange)
             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
             set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
             // 视频防抖 (EIS)
@@ -572,7 +575,7 @@ class CameraController(private val context: Context) {
         val logicalCameraId = resolveLogicalBackCameraId()
         DebugLog.d(TAG, "逻辑相机+缩放: logicalCameraId=$logicalCameraId, zoomRatio=$zoomRatio, lens=${lens.name}")
 
-        // 4. 配置预览 Surface — 中等分辨率保证流畅和画质
+        // 4. 配置预览 Surface — ~5MP 固定，保证流畅和画质
         val sensorAspect = selectMaxSensorResolution(logicalCameraId).let {
             it.width.toFloat() / it.height
         }
@@ -580,9 +583,11 @@ class CameraController(private val context: Context) {
         val previewSurface = configurePreviewSurface(textureView, previewSize.width, previewSize.height)
             ?: throw IllegalStateException("无法配置预览 Surface")
 
-        // 5. 解析 FPS Range
-        val actualRange = resolveSurfaceFpsRange(logicalCameraId, fps)
-        lastAppliedFps = actualRange.upper
+        // 5. 解析帧率 — 设最宽 FPS Range 确保帧率，同时给 HAL 灵活选择传感器模式
+        val (actualFps, _) = resolveActualFpsFromCameraId(logicalCameraId, fps)
+        lastAppliedFps = actualFps
+        val zoomFpsRange = resolveSurfaceFpsRange(logicalCameraId, fps)
+        fpsRangeWasSetOnBind = true
 
         // 6. 查询传感器信息
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -605,7 +610,7 @@ class CameraController(private val context: Context) {
         // 9. 构建 CaptureRequest — 使用 TEMPLATE_PREVIEW 获得最宽 FOV
         val requestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             addTarget(previewSurface)
-            set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, actualRange)
+            set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, zoomFpsRange)
             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
             set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
             // 视频防抖
@@ -618,7 +623,7 @@ class CameraController(private val context: Context) {
                 currentCropRegion = activeArray
                 DebugLog.d(TAG, "SCALER_CROP_REGION: 全幅 ${activeArray.width()}x${activeArray.height()}")
             }
-            DebugLog.d(TAG, "已设置 CONTROL_ZOOM_RATIO=$zoomRatio")
+            DebugLog.d(TAG, "已设置 CONTROL_ZOOM_RATIO=$zoomRatio, FPS=[${zoomFpsRange.lower},${zoomFpsRange.upper}]")
         }
         camera2RequestBuilder = requestBuilder
 
@@ -626,6 +631,9 @@ class CameraController(private val context: Context) {
 
         // 应用 TextureView 变换矩阵 — 修正预览旋转和宽高比
         applyPreviewTransform(textureView, logicalCameraId, previewSize.width, previewSize.height)
+
+        // 初始化缩放范围（读取逻辑相机的 min/max zoomRatio）
+        initZoomFromCameraCharacteristics(logicalCameraId)
 
         // 标记为物理相机模式（复用现有基础设施）
         isPhysicalCameraMode = true
@@ -739,6 +747,7 @@ class CameraController(private val context: Context) {
         // 5. 解析最佳 FPS Range
         val actualRange = resolveSurfaceFpsRange(cameraId, fps)
         lastAppliedFps = actualRange.upper
+        fpsRangeWasSetOnBind = true  // Surface 模式始终设置 FPS Range
 
         DebugLog.d(TAG, "Camera2 Surface 模式: cameraId=$cameraId, 请求fps=$fps, 实际Range=${actualRange}, 镜头=${lens.name}")
 
@@ -835,7 +844,7 @@ class CameraController(private val context: Context) {
         camera2Thread = thread
         camera2Handler = handler
 
-        // 3. 配置预览 Surface — 中等分辨率保证流畅和画质
+        // 3. 配置预览 Surface — ~5MP 固定，保证流畅和画质
         val sensorAspect = selectMaxSensorResolution(cameraId).let {
             it.width.toFloat() / it.height
         }
@@ -843,9 +852,13 @@ class CameraController(private val context: Context) {
         val previewSurface = configurePreviewSurface(textureView, previewSize.width, previewSize.height)
             ?: throw IllegalStateException("无法配置预览 Surface")
 
-        // 4. 解析 FPS Range
-        val actualRange = resolveSurfaceFpsRange(cameraId, fps)
-        lastAppliedFps = actualRange.upper
+        // 4. 解析帧率 — 录制模式设宽范围保帧率，预览模式不设以保画质
+        val fpsRangeToSet: android.util.Range<Int>?
+        // 设置最宽 FPS Range 确保帧率，同时给 HAL 灵活选择传感器模式保持画质
+        val (actualFps, _) = resolveActualFpsFromCameraId(cameraId, fps)
+        fpsRangeToSet = resolveSurfaceFpsRange(cameraId, fps)
+        lastAppliedFps = actualFps
+        fpsRangeWasSetOnBind = true
 
         // 5. 查询物理相机传感器信息（诊断用）
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -876,7 +889,7 @@ class CameraController(private val context: Context) {
         // 8. 构建 CaptureRequest — 使用 TEMPLATE_PREVIEW 获得最宽 FOV
         val requestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             surfaces.forEach { surface -> addTarget(surface) }
-            set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, actualRange)
+            set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRangeToSet)
             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
             set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
             // 视频防抖
@@ -895,6 +908,9 @@ class CameraController(private val context: Context) {
         // 应用 TextureView 变换矩阵 — 修正预览旋转和宽高比
         applyPreviewTransform(textureView, cameraId, previewSize.width, previewSize.height)
 
+        // 初始化缩放范围
+        initZoomFromCameraCharacteristics(cameraId)
+
         isPhysicalCameraMode = true
         _isPhysicalCameraMode.value = true
         isSurfaceMode = encoderSurface != null
@@ -904,7 +920,7 @@ class CameraController(private val context: Context) {
             ?: CameraLens.WIDE
         _currentLens.value = lens
 
-        DebugLog.d(TAG, "物理相机绑定完成: cameraId=$cameraId, surfaces=${surfaces.size}, fps=${actualRange}, lens=${lens.name}")
+        DebugLog.d(TAG, "物理相机绑定完成: cameraId=$cameraId, surfaces=${surfaces.size}, fps=${lastAppliedFps}fps, lens=${lens.name}")
     }
 
     /**
@@ -1025,9 +1041,15 @@ class CameraController(private val context: Context) {
 
         try {
             val cameraId = device.id
+            // FPS Range 策略：显式传入时使用，否则遵循初始绑定时是否设置的策略
             val range = fpsRange ?: run {
-                val fps = if (lastAppliedFps > 0) lastAppliedFps else 30
-                resolveSurfaceFpsRange(cameraId, fps)
+                if (!fpsRangeWasSetOnBind) {
+                    // 初始绑定时未设 FPS Range（预览模式），rebuild 时也不设
+                    null
+                } else {
+                    val fps = if (lastAppliedFps > 0) lastAppliedFps else 30
+                    resolveSurfaceFpsRange(cameraId, fps)
+                }
             }
             val zoom = zoomRatio ?: _zoomRatio.value
 
@@ -1038,7 +1060,10 @@ class CameraController(private val context: Context) {
             val template = if (isSurfaceMode) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW
             val requestBuilder = device.createCaptureRequest(template).apply {
                 camera2Surfaces.forEach { surface -> addTarget(surface) }
-                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
+                // 仅在初始绑定或热管理显式设置了 FPS Range 时才设置
+                if (range != null) {
+                    set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
+                }
                 set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                 set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, videoStabilizationMode)
@@ -1053,7 +1078,7 @@ class CameraController(private val context: Context) {
             }
             camera2RequestBuilder = requestBuilder
             session.setRepeatingRequest(requestBuilder.build(), null, handler)
-            if (fpsRange != null) lastAppliedFps = range.upper
+            if (range != null) lastAppliedFps = range.upper
             DebugLog.d(TAG, "CaptureRequest 已重建: fpsRange=${range}, eisMode=$videoStabilizationMode, zoom=$zoom")
         } catch (e: Exception) {
             DebugLog.w(TAG, "重建 CaptureRequest 失败: ${e.message}")
@@ -1169,12 +1194,17 @@ class CameraController(private val context: Context) {
      *
      * 预览分辨率过高（如 4000×3000）会导致 ISP 带宽不足，画面卡顿。
      * 此方法从传感器支持的输出尺寸中选一个匹配宽高比的中等分辨率，
-     * 在流畅性和画质之间取得平衡（目标 ~2MP）。
+     * 在流畅性和画质之间取得平衡（目标 ~5MP）。
      *
      * @param cameraId 相机 ID
      * @param sensorAspect 传感器宽高比（宽/高）
+     * @param maxPixels 最大像素数，默认 ~5MP
      */
-    private fun selectPreviewResolution(cameraId: String, sensorAspect: Float): Size {
+    private fun selectPreviewResolution(
+        cameraId: String,
+        sensorAspect: Float,
+        maxPixels: Long = 2560L * 1920L,
+    ): Size {
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val chars = cameraManager.getCameraCharacteristics(cameraId)
         val configMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
@@ -1189,8 +1219,7 @@ class CameraController(private val context: Context) {
             return Size(1920, 1080)
         }
 
-        // 选最接近但不超过 5MP 的分辨率，保证清晰度
-        val maxPixels = 2560L * 1920L // ~4.9MP
+        // 选最接近但不超过 maxPixels 的分辨率，保证清晰度
         return candidates.firstOrNull { it.width.toLong() * it.height <= maxPixels }
             ?: candidates.last()
     }
@@ -1237,10 +1266,9 @@ class CameraController(private val context: Context) {
      * 为 Camera2 Surface 模式解析最佳 FPS Range
      *
      * 策略（按优先级）：
-     * 1. 精确匹配 [fps, fps]
-     * 2. 包含 fps 的最窄范围
-     * 3. upper >= fps 的任意范围
-     * 4. 构造 [fps, fps]（兜底）
+     * 1. 包含 fps 的范围中，选下限最接近 fps 的（避免 HAL 以过低帧率输出）
+     * 2. upper >= fps 的任意范围
+     * 3. 构造 [fps, fps]（兜底）
      */
     private fun resolveSurfaceFpsRange(cameraId: String, fps: Int): android.util.Range<Int> {
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -1250,18 +1278,20 @@ class CameraController(private val context: Context) {
 
         DebugLog.d(TAG, "Surface FPS 解析: 可用范围=${fpsRanges.map { "[${it.lower},${it.upper}]" }}, 请求=$fps")
 
-        // 选上限 ≥ fps 的最宽范围（下限最低），保持全幅 FOV
-        // [30,60] 优于 [60,60]——HAL 能灵活选择传感器模式
-        val wideRange = fpsRanges
+        // 选包含 fps 的范围中下限最高的，确保 HAL 输出帧率接近目标
+        // [30,30] 优于 [25,30] 优于 [14,30]——下限越高 HAL 越不会掉到低帧率
+        val tightRange = fpsRanges
             .filter { it.upper >= fps && it.lower <= fps }
-            .minByOrNull { it.lower }
-        if (wideRange != null) {
-            DebugLog.d(TAG, "Surface FPS: 最宽范围 [${wideRange.lower},${wideRange.upper}]")
-            return wideRange
+            .maxByOrNull { it.lower }
+        if (tightRange != null) {
+            DebugLog.d(TAG, "Surface FPS: 最优范围 [${tightRange.lower},${tightRange.upper}]")
+            return tightRange
         }
 
-        // 降级：任意上限 ≥ fps 的范围
-        val anyRange = fpsRanges.firstOrNull { it.upper >= fps }
+        // 降级：任意上限 ≥ fps 的范围，选上限最高的
+        val anyRange = fpsRanges
+            .filter { it.upper >= fps }
+            .maxByOrNull { it.upper }
         if (anyRange != null) {
             DebugLog.d(TAG, "Surface FPS: 兜底范围 [${anyRange.lower},${anyRange.upper}]")
             return anyRange
