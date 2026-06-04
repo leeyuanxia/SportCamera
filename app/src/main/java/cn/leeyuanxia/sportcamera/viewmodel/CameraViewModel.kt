@@ -71,6 +71,13 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     @Volatile
     private var isInitialized = false
 
+    // 保存最后的绑定状态，用于恢复
+    @Volatile
+    private var lastTextureView: android.view.TextureView? = null
+
+    @Volatile
+    private var lastOrientation: RecordOrientation = RecordOrientation.PORTRAIT
+
     // ---- 暴露给 UI 的 StateFlow ----
 
     val appState: StateFlow<AppState> = voiceTriggerRecorder.appState
@@ -213,6 +220,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         textureView: TextureView,
         orientation: RecordOrientation,
     ) {
+        // 保存绑定状态，用于暂停/恢复
+        lastTextureView = textureView
+        lastOrientation = orientation
+
         val profile = resolutionProfile.value
         framePipeline.setTargetSize(profile.width, profile.height)
         // 传递 TextureView 引用给 VoiceTriggerRecorder（Surface 模式需要）
@@ -254,6 +265,21 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         // 恢复预览和 UI
         _previewVisible.value = true
         _uiVisible.value = true
+        // stop() 内部调用了 stopCamera2Session()，需要重新绑定预览
+        viewModelScope.launch {
+            lastTextureView?.let { textureView ->
+                val profile = resolutionProfile.value
+                cameraController.bindPreview(
+                    textureView = textureView,
+                    lens = cameraController.currentLens.value,
+                    orientation = lastOrientation,
+                    framePipeline = framePipeline,
+                    encoderWidth = profile.width,
+                    encoderHeight = profile.height,
+                    fps = profile.fps,
+                )
+            }
+        }
     }
 
     /**
@@ -351,6 +377,33 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun setVideoStabilization(enabled: Boolean) {
         viewModelScope.launch {
             settingsRepo.setVideoStabilization(enabled)
+        }
+    }
+
+    /**
+     * 暂停预览（应用进入后台）
+     *
+     * 如果正在待机或录像，停止录制和预览，释放相机资源
+     */
+    suspend fun pausePreview() {
+        val currentState = appState.value
+        if (currentState is AppState.Standby || currentState.isRecording) {
+            DebugLog.d(TAG, "应用进入后台，停止预览")
+            voiceTriggerRecorder.stop()
+            cameraController.stopCamera2Session()
+        }
+    }
+
+    /**
+     * 恢复预览（应用回到前台）
+     *
+     * 重新绑定相机预览，如果之前在待机状态则自动恢复待机
+     */
+    suspend fun resumePreview() {
+        DebugLog.d(TAG, "应用回到前台，恢复预览")
+        // 只恢复预览，不自动进入待机（需用户手动点击待机按钮）
+        lastTextureView?.let { textureView ->
+            bindCamera(textureView, lastOrientation)
         }
     }
 

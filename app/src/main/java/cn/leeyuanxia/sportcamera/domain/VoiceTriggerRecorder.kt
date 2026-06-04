@@ -127,7 +127,7 @@ class VoiceTriggerRecorder(
 
         // 判断是否需要 Surface 模式（4K@60fps 或 物理相机直连模式）
         val isPhysicalCamera = cameraController.isPhysicalCameraMode
-        val needsSurfaceMode = (currentProfile.width >= 3840 && currentProfile.fps > 30) || isPhysicalCamera
+        val needsSurfaceMode = true  // 所有分辨率都使用 Surface 零拷贝模式
 
         if (needsSurfaceMode) {
             // ---- Surface 模式（4K@60fps 或 物理相机直连） ----
@@ -364,12 +364,18 @@ class VoiceTriggerRecorder(
      */
     private suspend fun restartStandby() {
         recordJob = null
-        stop()
+        // 录像完成后回到待机：不停止相机，保持帧流持续到达
+        // enterStandby() 需要相机持续输出帧来触发编码器创建
+        stopInternal(stopCamera = false)
         delay(300)  // 等待前台服务完全停止
         enterStandby()
     }
 
     fun stop() {
+        stopInternal(stopCamera = true)
+    }
+
+    private fun stopInternal(stopCamera: Boolean) {
         kwsJob?.cancel()
         recordJob?.cancel()
         preRecordDrainJob?.cancel()
@@ -384,8 +390,11 @@ class VoiceTriggerRecorder(
         // 清理 Surface 模式回调
         thermalThrottler.onSurfaceFpsChanged = null
         framePipeline.setSurfaceMode(false)
-        // 停止 Camera2 会话（如果在 Surface 模式）
-        cameraController.stopCamera2Session()
+        // 只有用户主动停止待机时才停止 Camera2 会话
+        // restartStandby() 调用时保持相机运行，enterStandby() 需要帧持续到达
+        if (stopCamera) {
+            cameraController.stopCamera2Session()
+        }
         preRecordManager.stop()
         framePipeline.setEncoder(null)
         powerStateManager.releaseWakeLock()

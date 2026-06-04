@@ -97,9 +97,10 @@ class RingBufferRecorder(
     @Volatile
     private var inputSurface: Surface? = null
 
-    /** 是否使用 Surface 输入模式（4K@60fps 或物理相机模式） */
-    val useSurfaceInput: Boolean
-        get() = forceSurfaceInput || (width >= 3840 && fps > 30)
+    /** 始终使用 Surface 输入模式（零拷贝）
+     *  Camera2 直接输出到编码器 InputSurface，绕过 YUV 转换，所有分辨率帧率稳定。
+     */
+    val useSurfaceInput: Boolean = true
 
     /** 编码器输出格式中的 CSD-0（SPS），从 INFO_OUTPUT_FORMAT_CHANGED 提取 */
     @Volatile
