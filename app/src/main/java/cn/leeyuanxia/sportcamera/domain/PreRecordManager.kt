@@ -50,6 +50,9 @@ class PreRecordManager : FrameConsumer {
     @Volatile
     private var ringBufferGeneration: Int = 0
 
+    /** 保护 ensureEncoder() / updateThrottleConfig() 并发创建编码器的锁 */
+    private val encoderLock = Any()
+
     /**
      * Surface 模式回调 — 编码器 Surface 创建后通知 VoiceTriggerRecorder 绑定 Camera2
      *
@@ -114,15 +117,22 @@ class PreRecordManager : FrameConsumer {
      * 关键：使用安全发布模式。先在局部变量中完成 prepare() + start()，
      * 最后才赋值给 volatile 字段 ringBuffer。
      *
-     * 如果先写 ringBuffer 再 prepare/start，主线程的 drainLoop 会在
-     * prepare/start 完成前就看到非 null 的 ringBuffer，导致 drainEncoder
-     * 读到 encoder=null / isRunning=false 立即退出（0 帧 drain）。
-     *
-     * 参数来源：
-     * - 分辨率：相机实际输出（cameraWidth × cameraHeight），与用户选择的 profile 一致
-     * - fps/bitrate：默认使用 currentProfile（用户选择），热管理降级时由 throttleConfig 覆盖
+     * 调用者必须持有 encoderLock（除 createSurfaceEncoder 外，该方法在主线程同步执行）。
      */
     private fun createBuffer(w: Int, h: Int, fps: Int, bitrateBps: Int, forceSurfaceInput: Boolean = false) {
+        synchronized(encoderLock) {
+            createBufferInternal(w, h, fps, bitrateBps, forceSurfaceInput)
+            ringBufferGeneration++
+        }
+    }
+
+    /**
+     * createBuffer 的内部实现（不获取锁、不递增 generation）
+     *
+     * updateThrottleConfig() 已在外层递增 generation 并持有 encoderLock，
+     * 直接调用此方法避免重复递增。
+     */
+    private fun createBufferInternal(w: Int, h: Int, fps: Int, bitrateBps: Int, forceSurfaceInput: Boolean = false) {
         val oldBuffer = ringBuffer
         val recorder = RingBufferRecorder(
             maxDurationSec = currentDuration.seconds,
@@ -133,12 +143,11 @@ class PreRecordManager : FrameConsumer {
         )
 
         if (recorder.useSurfaceInput) {
-            // Surface 模式（4K@60fps）：相机直接输出到编码器 Surface
+            // Surface 模式：相机直接输出到编码器 Surface
             try {
                 val surface = recorder.prepareWithSurface()
                 recorder.start()
                 drainStarted = true
-                ringBufferGeneration++
                 ringBuffer = recorder
                 // 通知外部（VoiceTriggerRecorder）绑定 Camera2 会话
                 encoderSurfaceReady?.invoke(surface)
@@ -146,10 +155,11 @@ class PreRecordManager : FrameConsumer {
             } catch (e: Exception) {
                 // Surface 模式不支持，降级到 ByteBuffer 模式
                 DebugLog.w(TAG, "Surface 模式失败，降级到 ByteBuffer: ${e.message}")
+                // 关键修复：降级时关闭 useSurfaceInput，否则 feedFrame 会因 useSurfaceInput=true 而丢弃所有帧
+                recorder.useSurfaceInput = false
                 recorder.prepare()
                 recorder.start()
                 drainStarted = true
-                ringBufferGeneration++
                 ringBuffer = recorder
             }
         } else {
@@ -157,7 +167,6 @@ class PreRecordManager : FrameConsumer {
             recorder.prepare()
             recorder.start()
             drainStarted = true
-            ringBufferGeneration++
             ringBuffer = recorder
             DebugLog.d(TAG, "环形缓冲已创建(gen=$ringBufferGeneration): ${w}x${h} @${fps}fps ${bitrateBps/1000}kbps, ${currentDuration.seconds}s")
         }
@@ -226,29 +235,32 @@ class PreRecordManager : FrameConsumer {
      * 编码器创建/重建逻辑（feedFrame 和 feedFrameDirect 共用）
      */
     private fun ensureEncoder(width: Int, height: Int) {
-        val resolutionChanged = (cameraWidth > 0 && width > 0 && height > 0
-            && (width != cameraWidth || height != cameraHeight))
+        synchronized(encoderLock) {
+            val resolutionChanged = (cameraWidth > 0 && width > 0 && height > 0
+                && (width != cameraWidth || height != cameraHeight))
 
-        if (cameraWidth == 0 || resolutionChanged) {
-            if (resolutionChanged) {
-                DebugLog.d(TAG, "分辨率变化: ${cameraWidth}x${cameraHeight} → ${width}x${height}，重建编码器")
-                ringBuffer?.stop()
-                ringBuffer?.release()
-                ringBuffer = null
-                drainStarted = false
+            if (cameraWidth == 0 || resolutionChanged) {
+                if (resolutionChanged) {
+                    DebugLog.d(TAG, "分辨率变化: ${cameraWidth}x${cameraHeight} → ${width}x${height}，重建编码器")
+                    ringBuffer?.stop()
+                    ringBuffer?.release()
+                    ringBuffer = null
+                    drainStarted = false
+                }
+                cameraWidth = width
+                cameraHeight = height
+                DebugLog.d(TAG, "首帧/分辨率变更: ${width}x${height}, readyToCreate=$readyToCreate, drainStarted=$drainStarted")
             }
-            cameraWidth = width
-            cameraHeight = height
-            DebugLog.d(TAG, "首帧/分辨率变更: ${width}x${height}, readyToCreate=$readyToCreate, drainStarted=$drainStarted")
-        }
 
-        if (readyToCreate && !drainStarted && cameraWidth > 0) {
-            val config = throttleConfig
-            createBuffer(
-                cameraWidth, cameraHeight,
-                fps = config?.preRecordFps ?: currentProfile.fps,
-                bitrateBps = config?.preRecordBitrateBps ?: currentProfile.bitrateBps,
-            )
+            if (readyToCreate && !drainStarted && cameraWidth > 0) {
+                val config = throttleConfig
+                createBufferInternal(
+                    cameraWidth, cameraHeight,
+                    fps = config?.preRecordFps ?: currentProfile.fps,
+                    bitrateBps = config?.preRecordBitrateBps ?: currentProfile.bitrateBps,
+                )
+                ringBufferGeneration++
+            }
         }
     }
 
@@ -277,17 +289,24 @@ class PreRecordManager : FrameConsumer {
             return
         }
 
-        if (ringBuffer != null && drainStarted) {
-            DebugLog.d(TAG, "热管理触发重建编码器: ${oldConfig?.preRecordFps}→${config.preRecordFps}fps, ${oldConfig?.preRecordBitrateBps}→${config.preRecordBitrateBps}bps")
-            ringBuffer?.stop()
-            ringBuffer?.release()
-            drainStarted = false
-            if (cameraWidth > 0) {
-                createBuffer(
-                    cameraWidth, cameraHeight,
-                    fps = config.preRecordFps,
-                    bitrateBps = config.preRecordBitrateBps,
-                )
+        synchronized(encoderLock) {
+            if (ringBuffer != null && drainStarted) {
+                DebugLog.d(TAG, "热管理触发重建编码器: ${oldConfig?.preRecordFps}→${config.preRecordFps}fps, ${oldConfig?.preRecordBitrateBps}→${config.preRecordBitrateBps}bps")
+                // 关键修复：先递增 generation 再停止旧编码器
+                // drainLoop 在 rb.drainEncoder() 返回后会检查 ringBufferGeneration != lastGeneration
+                // 如果 createBuffer 在 drainLoop 检查之后才执行，drainLoop 会误认为没有新编码器而退出
+                // 提前递增 generation 确保 drainLoop 无论何时检查都能感知到重建请求
+                ringBufferGeneration++
+                ringBuffer?.stop()
+                ringBuffer?.release()
+                drainStarted = false
+                if (cameraWidth > 0) {
+                    createBufferInternal(
+                        cameraWidth, cameraHeight,
+                        fps = config.preRecordFps,
+                        bitrateBps = config.preRecordBitrateBps,
+                    )
+                }
             }
         }
     }

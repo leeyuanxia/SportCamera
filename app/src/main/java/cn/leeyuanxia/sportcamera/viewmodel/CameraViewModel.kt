@@ -78,6 +78,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     @Volatile
     private var lastOrientation: RecordOrientation = RecordOrientation.PORTRAIT
 
+    /** 正在绑定中标志，防止 LaunchedEffect 重启导致并发 bindCamera 调用 */
+    @Volatile
+    private var isBinding: Boolean = false
+
     // ---- 暴露给 UI 的 StateFlow ----
 
     val appState: StateFlow<AppState> = voiceTriggerRecorder.appState
@@ -220,35 +224,45 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         textureView: TextureView,
         orientation: RecordOrientation,
     ) {
-        // 保存绑定状态，用于暂停/恢复
-        lastTextureView = textureView
-        lastOrientation = orientation
+        // 防止并发绑定：如果已有绑定在进行中，跳过
+        if (isBinding) {
+            DebugLog.d(TAG, "bindCamera 已在执行中，跳过重复调用")
+            return
+        }
+        isBinding = true
+        try {
+            // 保存绑定状态，用于暂停/恢复
+            lastTextureView = textureView
+            lastOrientation = orientation
 
-        val profile = resolutionProfile.value
-        framePipeline.setTargetSize(profile.width, profile.height)
-        // 传递 TextureView 引用给 VoiceTriggerRecorder（Surface 模式需要）
-        voiceTriggerRecorder.setTextureView(textureView)
+            val profile = resolutionProfile.value
+            framePipeline.setTargetSize(profile.width, profile.height)
+            // 传递 TextureView 引用给 VoiceTriggerRecorder（Surface 模式需要）
+            voiceTriggerRecorder.setTextureView(textureView)
 
-        // 先绑定 WIDE 初始化缩放范围（initZoomFromCameraCharacteristics 需要）
-        cameraController.bindPreview(
-            textureView = textureView,
-            lens = CameraLens.WIDE,
-            orientation = orientation,
-            framePipeline = framePipeline,
-            encoderWidth = profile.width,
-            encoderHeight = profile.height,
-            fps = profile.fps,
-        )
-        cameraController.refreshEisCapability()
+            // 先绑定 WIDE 初始化缩放范围（initZoomFromCameraCharacteristics 需要）
+            cameraController.bindPreview(
+                textureView = textureView,
+                lens = CameraLens.WIDE,
+                orientation = orientation,
+                framePipeline = framePipeline,
+                encoderWidth = profile.width,
+                encoderHeight = profile.height,
+                fps = profile.fps,
+            )
+            cameraController.refreshEisCapability()
 
-        // 恢复用户上次保存的镜头选择
-        val restoredLens = settingsRepo.cameraLens.first()
-        if (restoredLens != CameraLens.WIDE && restoredLens != CameraLens.FRONT) {
-            val switched = cameraController.switchLens(restoredLens)
-            if (switched != null) {
-                cameraController.refreshEisCapability()
-                DebugLog.d(TAG, "启动时恢复镜头: ${restoredLens.name}")
+            // 恢复用户上次保存的镜头选择
+            val restoredLens = settingsRepo.cameraLens.first()
+            if (restoredLens != CameraLens.WIDE && restoredLens != CameraLens.FRONT) {
+                val switched = cameraController.switchLens(restoredLens)
+                if (switched != null) {
+                    cameraController.refreshEisCapability()
+                    DebugLog.d(TAG, "启动时恢复镜头: ${restoredLens.name}")
+                }
             }
+        } finally {
+            isBinding = false
         }
     }
 

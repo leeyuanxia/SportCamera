@@ -181,8 +181,20 @@ class VoiceTriggerRecorder(
             // 必须主动创建编码器，获取 encoder Surface 后才能绑定 Camera2
             // 物理相机模式需要 forceSurfaceInput=true（非 4K 分辨率也需要 Surface 输入）
             preRecordManager.createSurfaceEncoder(forceSurfaceInput = isPhysicalCamera)
-            framePipeline.setSurfaceMode(true)
-            DebugLog.d(TAG, "预录管线已连接（Surface 模式），编码器主动创建完成, isPhysicalCamera=$isPhysicalCamera")
+
+            // 检查 Surface 模式是否实际创建成功（可能降级到 ByteBuffer）
+            if (preRecordManager.isSurfaceMode) {
+                framePipeline.setSurfaceMode(true)
+                DebugLog.d(TAG, "预录管线已连接（Surface 模式），编码器主动创建完成, isPhysicalCamera=$isPhysicalCamera")
+            } else {
+                // Surface 模式降级到 ByteBuffer：使用传统 feedFrame 路径
+                framePipeline.setSurfaceMode(false)
+                preRecordManager.markReadyToCreate()
+                framePipeline.setEncoder(preRecordManager)
+                val throttleConfig = thermalThrottler.config.value
+                framePipeline.setTargetFps(throttleConfig.preRecordFps)
+                DebugLog.d(TAG, "预录管线已连接（降级到 ByteBuffer 模式），fps=${throttleConfig.preRecordFps}")
+            }
         } else {
             // ---- ByteBuffer 模式（非 4K@60fps） ----
             // 现有逻辑完全不变

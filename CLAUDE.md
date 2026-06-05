@@ -2,7 +2,7 @@
 
 > 本文件是 Claude Code 在此项目中编写代码时必须遵循的规范。
 > 所有新代码和修改都应遵守以下约定。
-> 思维必须使用中文
+> 思考必须使用中文
 
 ## 项目概述
 
@@ -219,6 +219,50 @@ adb logcat -s SportCameraLogger:D | grep -E "CameraController|Surface|Camera2"
 ---
 
 ## 修改日志
+
+### 2026-06-05：修复魅族 20 等设备 60fps 灰色不可选（高速视频 FPS 检测）
+
+**问题背景**：
+魅族 20 手机上所有分辨率的 60fps 都是灰色不可点击，但系统相机支持 60fps 录制。
+
+**根因分析**：
+- FPS 检测只读了 `CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES`（普通录制模式）
+- 魅族 20 HAL 在普通模式下只报告 max=30fps：`[30], 可用 Range: [[15,15], [14,24], ..., [30,30]]`
+- 系统相机通过 `CONSTRAINED_HIGH_SPEED_VIDEO` 能力支持 60fps
+- 代码中完全没有 `HIGH_SPEED_VIDEO` 的检查，`_supportedFps` 只有 `{30}`
+- UI 取交集 `availableFpsForRes(height) ∩ {30}` → 60fps 被过滤灰色
+
+**修改文件：**
+- `hardware/camera/CameraController.kt` — 新增 FPS 综合扫描 + 高速视频检测
+
+**改动内容：**
+
+1. **新增 `collectAllSupportedFps()` 函数**：
+   - 在 `detectAvailableLenses()` 末尾调用，扫描所有已检测相机的 FPS 能力
+   - 来源 1：`CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES`（普通录制）
+   - 来源 2：`StreamConfigurationMap.highSpeedVideoFpsRanges`（高速视频）
+   - 合并所有 ≥30/≥60 的 FPS 值到 `_supportedFps`
+   - 30fps 始终作为兜底
+
+2. **新增 `collectHighSpeedFps()` 辅助函数**：
+   - 通过 `SCALER_STREAM_CONFIGURATION_MAP` → `highSpeedVideoFpsRanges` 获取高速视频 FPS
+   - 返回 ≥60 的 FPS 值集合
+
+3. **更新 `resolveActualFpsFromCameraId()`**：
+   - **移除** `_supportedFps.value = aeSupported.toSet()` — 不再用单摄像头数据覆盖全局 FPS 集合
+   - 新增高速视频 FPS 检查：`maxAvailableFps = max(普通max, 高速视频max)`
+   - 当 `maxAvailableFps >= 60` 时允许选择 60fps（即使普通 AE 不支持）
+   - 综合最大帧率用于 clamp 请求帧率
+
+4. **新增 import**：`android.hardware.camera2.params.StreamConfigurationMap`
+
+**修复效果**：
+- 初始化时扫描所有摄像头，合并普通+高速视频 FPS 到 `_supportedFps`
+- 魅族 20 如果 HIGH_SPEED_VIDEO 支持 60fps，UI 将显示 60fps 可选
+- 综合日志清晰展示每个相机的 FPS 来源
+
+**注意**：此修复解决 UI 层面的 60fps 可选问题。实际录制 60fps 时若普通 AE 不支持，
+需进一步实现 `createHighSpeedRequestList()` 高速视频会话。
 
 ### 2026-06-05：修复 4K@30fps 帧率过低 + 停止待机后预览卡住（第七轮修复）
 

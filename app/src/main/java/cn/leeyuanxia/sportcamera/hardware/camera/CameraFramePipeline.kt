@@ -3,6 +3,7 @@ package cn.leeyuanxia.sportcamera.hardware.camera
 import android.media.Image
 import android.media.ImageReader
 import cn.leeyuanxia.sportcamera.util.DebugLog
+import kotlin.math.ceil
 
 /**
  * 摄像头帧管线 — 连接 Camera2 ImageReader 和编码器
@@ -59,6 +60,10 @@ class CameraFramePipeline : ImageReader.OnImageAvailableListener {
     @Volatile
     private var cameraFps: Int = 30
 
+    /** 最近一次 setTargetFps 的值，用于 setCameraFps 时重新计算 skipPattern */
+    @Volatile
+    private var lastTargetFps: Int = 30
+
     /**
      * 是否处于 Surface 模式（4K@60fps）
      *
@@ -80,12 +85,17 @@ class CameraFramePipeline : ImageReader.OnImageAvailableListener {
     /**
      * 设置摄像头实际输出帧率
      *
-     * 由 CameraController 在每次 bindPreview 时同步传入，
-     * 与 Camera2 CONTROL_AE_TARGET_FPS_RANGE 保持一致。
+     * 由 CameraController 在每次 bindPreview 时同步传入。
+     * 更新后重新计算 skipPattern，解决 setTargetFps 可能先于 setCameraFps
+     * 被调用导致的跳帧计算错误（使用默认 cameraFps=30 而非实际值）。
      */
     fun setCameraFps(fps: Int) {
         cameraFps = fps
-        DebugLog.d(TAG, "摄像头帧率: ${fps}fps")
+        // 重新计算 skipPattern：热管理可能在 bindPreview 完成前就发出配置更新，
+        // 导致 setTargetFps 在 setCameraFps 之前调用，使用了过时的 cameraFps=30
+        val targetFps = lastTargetFps
+        skipPattern = ceil(fps.toDouble() / targetFps).toInt().coerceAtLeast(1)
+        DebugLog.d(TAG, "摄像头帧率: ${fps}fps, 重算跳帧比例: 1/${skipPattern}")
     }
 
     /**
@@ -97,7 +107,11 @@ class CameraFramePipeline : ImageReader.OnImageAvailableListener {
      * @param fps 目标帧率（如待机 30fps、录制 60/90fps）
      */
     fun setTargetFps(fps: Int) {
-        skipPattern = (cameraFps / fps).coerceAtLeast(1)
+        lastTargetFps = fps
+        // 使用浮点数除法 + 向上取整，避免整数除法截断导致的跳帧不足
+        // 例如 cameraFps=30, targetFps=24: ceil(30/24)=2（每2帧处理1帧→15fps输出）
+        // 整数除法: 30/24=1（每1帧处理1帧→30fps全部接收→编码器可能过载）
+        skipPattern = ceil(cameraFps.toDouble() / fps).toInt().coerceAtLeast(1)
         DebugLog.d(TAG, "目标帧率: ${fps}fps, 摄像头=${cameraFps}fps, 跳帧比例: 1/${skipPattern}")
     }
 

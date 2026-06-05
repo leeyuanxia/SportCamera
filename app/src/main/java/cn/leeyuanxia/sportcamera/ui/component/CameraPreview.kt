@@ -7,7 +7,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -16,9 +15,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.viewinterop.AndroidView
 import android.view.TextureView
 import cn.leeyuanxia.sportcamera.domain.model.RecordOrientation
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import cn.leeyuanxia.sportcamera.util.DebugLog
 
 /**
  * TextureView 相机预览的 Compose 封装
@@ -35,9 +32,10 @@ fun CameraPreview(
     isVisible: Boolean = true,
     onBindCamera: suspend (TextureView, RecordOrientation) -> Unit,
 ) {
-    val scope = rememberCoroutineScope()
-
     var textureView by remember { mutableStateOf<TextureView?>(null) }
+    // 跟踪上一次绑定的参数，避免重复绑定
+    var lastBoundOrientation by remember { mutableStateOf<RecordOrientation?>(null) }
+    var lastBoundTv by remember { mutableStateOf<TextureView?>(null) }
 
     val configuration = LocalConfiguration.current
 
@@ -59,16 +57,24 @@ fun CameraPreview(
         }
     }
 
+    // 只在 TextureView 或 orientation 变化时才重新绑定
+    // 使用 LaunchedEffect 本身作为协程作用域，避免 scope.launch + NonCancellable
+    // 导致的并发 bindCamera 调用
     LaunchedEffect(textureView, configuration.orientation) {
         val tv = textureView ?: return@LaunchedEffect
-        scope.launch {
-            withContext(NonCancellable) {
-                try {
-                    onBindCamera(tv, orientation)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
+
+        // 防止同一参数重复绑定（注意：orientation 参数与 configuration.orientation 可能不同步）
+        if (tv === lastBoundTv && orientation == lastBoundOrientation) {
+            DebugLog.d("CameraPreview", "跳过重复绑定: orientation=$orientation")
+            return@LaunchedEffect
+        }
+
+        try {
+            onBindCamera(tv, orientation)
+            lastBoundOrientation = orientation
+            lastBoundTv = tv
+        } catch (e: Exception) {
+            DebugLog.e("CameraPreview", "绑定摄像头失败: ${e.message}", e)
         }
     }
 }

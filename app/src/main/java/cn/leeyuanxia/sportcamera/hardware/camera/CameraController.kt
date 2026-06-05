@@ -9,6 +9,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.params.StreamConfigurationMap
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
@@ -18,6 +19,7 @@ import android.view.TextureView
 import cn.leeyuanxia.sportcamera.util.DebugLog
 import cn.leeyuanxia.sportcamera.domain.model.CameraLens
 import cn.leeyuanxia.sportcamera.domain.model.RecordOrientation
+import cn.leeyuanxia.sportcamera.domain.model.ResolutionProfile
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -67,8 +69,14 @@ class CameraController(private val context: Context) {
     private var lastAppliedFps: Int = 30
     private var lastRebindLens: CameraLens? = null
 
-    /** 初始绑定时是否设置了 AE FPS Range — rebuild 时保持一致 */
+    /** 初始绑定时是否设置了 AE FPS Range — rebuild 时保持一致
+     *  设置于 bindPreviewInternal 等（持有 cameraMutex），
+     *  读取于 rebuildCaptureRequest（热管理/手势/EIS 线程），需 @Volatile */
+    @Volatile
     private var fpsRangeWasSetOnBind: Boolean = false
+
+    /** 保护 rebuildCaptureRequest 与 stopCamera2Session 的并发访问 */
+    private val requestLock = Any()
 
     // ---- Camera2 会话状态 ----
 
@@ -251,6 +259,81 @@ class CameraController(private val context: Context) {
 
         _availableLenses.value = lenses.toList()
         DebugLog.i(TAG, "===== 检测完成，可用镜头: ${lenses.toList()} =====")
+
+        // 扫描所有相机的 FPS 能力（包括高速视频模式），更新 UI 可选帧率
+        collectAllSupportedFps(allCameraChars)
+    }
+
+    /**
+     * 收集所有相机的 FPS 能力
+     *
+     * 从两个来源收集：
+     * 1. CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES — 普通录制模式的帧率范围
+     * 2. StreamConfigurationMap.getHighSpeedVideoFpsRanges() — 高速视频模式的帧率
+     *
+     * 合并所有相机、所有模式的 FPS 值，更新 UI 可选帧率。
+     * 魅族等厂商的 HAL 在普通 AE Range 中只报告 30fps，但通过 HIGH_SPEED_VIDEO 支持 60fps。
+     */
+    private fun collectAllSupportedFps(allCameraChars: Map<String, CameraCharacteristics>) {
+        val allFps = mutableSetOf<Int>()
+        allFps.add(30) // 始终支持 30fps 兜底
+
+        for ((cameraId, chars) in allCameraChars) {
+            try {
+                // 来源1：普通 AE Target FPS Range
+                val fpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                    ?: emptyArray()
+                val normalFps = fpsRanges.map { it.upper }.filter { it >= 30 }
+                allFps.addAll(normalFps)
+
+                // 来源2：高速视频 FPS
+                val configMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                if (configMap != null) {
+                    val highSpeedFpsRanges = configMap.highSpeedVideoFpsRanges
+                    val highSpeedFps = highSpeedFpsRanges.map { it.upper }.filter { it >= 60 }
+                    if (highSpeedFps.isNotEmpty()) {
+                        allFps.addAll(highSpeedFps)
+                        DebugLog.d(TAG, "摄像头 $cameraId 高速视频 FPS: $highSpeedFps")
+                    }
+                }
+
+                DebugLog.d(TAG, "摄像头 $cameraId FPS 汇总: 普通=$normalFps, 全部=$allFps")
+            } catch (e: Exception) {
+                DebugLog.w(TAG, "收集摄像头 $cameraId 的 FPS 信息失败: ${e.message}")
+            }
+        }
+
+        // 关键修复：只自动补全 ≤ AE 普通模式最大帧率的中间值
+        // 例如 AE 支持 [30,60]fps → 可补全 30/60
+        // 但 90fps 超过 AE 最大 60fps，需要高速视频会话，不能靠插值添加
+        // 值 > maxAeFps 必须来自实际的高速视频 FPS 列表（如 120/240/480）
+        val finalFps = allFps.toMutableSet()
+
+        // 计算所有相机 AE 普通模式的最大帧率（限制自动补全范围）
+        val allAeFps = mutableSetOf<Int>()
+        for ((_, chars) in allCameraChars) {
+            val fpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                ?: emptyArray()
+            allAeFps.addAll(fpsRanges.map { it.upper }.filter { it >= 30 })
+        }
+        val maxAeFps = allAeFps.maxOrNull() ?: 30
+
+        val appFpsOptions = ResolutionProfile.entries.map { it.fps }.distinct()
+        for (fpsOption in appFpsOptions) {
+            if (fpsOption <= maxAeFps) {
+                // 在 AE 普通模式范围内，可以安全补全
+                finalFps.add(fpsOption)
+            } else if (fpsOption in allFps) {
+                // 虽然在 AE 范围外，但确实在高速视频 FPS 列表中（如 120/240）
+                // 保留它，后续 resolveActualFpsFromCameraId 会判断是否需要高速会话
+            } else {
+                DebugLog.d(TAG, "跳过不支持的帧率: ${fpsOption}fps（AE最大=${maxAeFps}fps，高速视频=${allFps.filter { it > maxAeFps }}）")
+            }
+        }
+        _supportedFps.value = finalFps.toSet()
+
+        DebugLog.i(TAG, "===== 全局 FPS 能力: ${finalFps.sortedDescending()} " +
+            "(AE最大=${maxAeFps}fps, 高速最大=${allFps.maxOrNull() ?: 30}fps) =====")
     }
 
     /**
@@ -983,32 +1066,35 @@ class CameraController(private val context: Context) {
      * 停止 Camera2 会话并释放资源
      */
     fun stopCamera2Session() {
-        try {
-            camera2Session?.stopRepeating()
-        } catch (_: Exception) {}
-        try {
-            camera2Session?.close()
-        } catch (_: Exception) {}
-        camera2Session = null
-        camera2RequestBuilder = null
-        camera2Surfaces = emptyList()
-        currentCropRegion = null
+        // 与 rebuildCaptureRequest 共享锁，防止并发访问 session/device/handler
+        synchronized(requestLock) {
+            try {
+                camera2Session?.stopRepeating()
+            } catch (_: Exception) {}
+            try {
+                camera2Session?.close()
+            } catch (_: Exception) {}
+            camera2Session = null
+            camera2RequestBuilder = null
+            camera2Surfaces = emptyList()
+            currentCropRegion = null
 
-        try {
-            camera2Device?.close()
-        } catch (_: Exception) {}
-        camera2Device = null
+            try {
+                camera2Device?.close()
+            } catch (_: Exception) {}
+            camera2Device = null
 
-        imageReader?.close()
-        imageReader = null
+            imageReader?.close()
+            imageReader = null
 
-        camera2Handler = null
-        camera2Thread?.quitSafely()
-        camera2Thread = null
+            camera2Handler = null
+            camera2Thread?.quitSafely()
+            camera2Thread = null
 
-        if (isSurfaceMode) {
-            isSurfaceMode = false
-            DebugLog.d(TAG, "Camera2 Surface 会话已停止")
+            if (isSurfaceMode) {
+                isSurfaceMode = false
+                DebugLog.d(TAG, "Camera2 Surface 会话已停止")
+            }
         }
     }
 
@@ -1080,53 +1166,56 @@ class CameraController(private val context: Context) {
         videoStabilizationMode: Int = currentVideoStabilizationMode,
         zoomRatio: Float? = null,
     ) {
-        val session = camera2Session ?: return
-        val device = camera2Device ?: return
-        val handler = camera2Handler ?: return
+        // 关键修复：防止热管理/手势/EIS 等多线程并发调用导致 Camera2 会话崩溃
+        synchronized(requestLock) {
+            val session = camera2Session ?: return
+            val device = camera2Device ?: return
+            val handler = camera2Handler ?: return
 
-        try {
-            val cameraId = device.id
-            // FPS Range 策略：显式传入时使用，否则遵循初始绑定时是否设置的策略
-            val range = fpsRange ?: run {
-                if (!fpsRangeWasSetOnBind) {
-                    // 初始绑定时未设 FPS Range（预览模式），rebuild 时也不设
-                    null
-                } else {
-                    val fps = if (lastAppliedFps > 0) lastAppliedFps else 30
-                    resolveSurfaceFpsRange(cameraId, fps)
+            try {
+                val cameraId = device.id
+                // FPS Range 策略：显式传入时使用，否则遵循初始绑定时是否设置的策略
+                val range = fpsRange ?: run {
+                    if (!fpsRangeWasSetOnBind) {
+                        // 初始绑定时未设 FPS Range（预览模式），rebuild 时也不设
+                        null
+                    } else {
+                        val fps = if (lastAppliedFps > 0) lastAppliedFps else 30
+                        resolveSurfaceFpsRange(cameraId, fps)
+                    }
                 }
+                val zoom = zoomRatio ?: _zoomRatio.value
+
+                // 复用当前会话的 SCALER_CROP_REGION（在 bind 时已计算好）
+                val savedCropRegion = currentCropRegion
+
+                // Surface 模式用 TEMPLATE_RECORD，其他模式用 TEMPLATE_PREVIEW
+                val template = if (isSurfaceMode) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW
+                val requestBuilder = device.createCaptureRequest(template).apply {
+                    camera2Surfaces.forEach { surface -> addTarget(surface) }
+                    // 仅在初始绑定或热管理显式设置了 FPS Range 时才设置
+                    if (range != null) {
+                        set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
+                    }
+                    set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+                    set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                    set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, videoStabilizationMode)
+                    // 缩放
+                    if (zoom != 1.0f) {
+                        set(CaptureRequest.CONTROL_ZOOM_RATIO, zoom)
+                    }
+                    // 复用绑定时保存的 SCALER_CROP_REGION
+                    if (savedCropRegion != null) {
+                        set(CaptureRequest.SCALER_CROP_REGION, savedCropRegion)
+                    }
+                }
+                camera2RequestBuilder = requestBuilder
+                session.setRepeatingRequest(requestBuilder.build(), null, handler)
+                if (range != null) lastAppliedFps = range.upper
+                DebugLog.d(TAG, "CaptureRequest 已重建: fpsRange=${range}, eisMode=$videoStabilizationMode, zoom=$zoom")
+            } catch (e: Exception) {
+                DebugLog.w(TAG, "重建 CaptureRequest 失败: ${e.message}")
             }
-            val zoom = zoomRatio ?: _zoomRatio.value
-
-            // 复用当前会话的 SCALER_CROP_REGION（在 bind 时已计算好）
-            val savedCropRegion = currentCropRegion
-
-            // Surface 模式（4K@60fps 录制）用 TEMPLATE_RECORD，其他模式用 TEMPLATE_PREVIEW
-            val template = if (isSurfaceMode) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW
-            val requestBuilder = device.createCaptureRequest(template).apply {
-                camera2Surfaces.forEach { surface -> addTarget(surface) }
-                // 仅在初始绑定或热管理显式设置了 FPS Range 时才设置
-                if (range != null) {
-                    set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
-                }
-                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
-                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-                set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, videoStabilizationMode)
-                // 缩放
-                if (zoom != 1.0f) {
-                    set(CaptureRequest.CONTROL_ZOOM_RATIO, zoom)
-                }
-                // 复用绑定时保存的 SCALER_CROP_REGION
-                if (savedCropRegion != null) {
-                    set(CaptureRequest.SCALER_CROP_REGION, savedCropRegion)
-                }
-            }
-            camera2RequestBuilder = requestBuilder
-            session.setRepeatingRequest(requestBuilder.build(), null, handler)
-            if (range != null) lastAppliedFps = range.upper
-            DebugLog.d(TAG, "CaptureRequest 已重建: fpsRange=${range}, eisMode=$videoStabilizationMode, zoom=$zoom")
-        } catch (e: Exception) {
-            DebugLog.w(TAG, "重建 CaptureRequest 失败: ${e.message}")
         }
     }
 
@@ -1369,12 +1458,42 @@ class CameraController(private val context: Context) {
             val fpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
                 ?: arrayOf()
 
-            // 收集所有 ≥30 的 FPS 值（取每个 range 的 upper），始终更新 UI 可选帧率
+            // 收集当前摄像头普通模式支持的 FPS
             val aeSupported = fpsRanges.map { it.upper }.filter { it >= 30 }.distinct().sortedDescending()
-            _supportedFps.value = aeSupported.toSet()
+            val maxNormalFps = aeSupported.firstOrNull() ?: 30
             DebugLog.d(TAG, "摄像头 $cameraId AE 支持的 FPS: $aeSupported, 可用 Range: ${fpsRanges.map { "[${it.lower},${it.upper}]" }}, 请求: ${requestedFps}fps, 编码宽度: ${encoderWidth}")
 
-            val actualFps = requestedFps.coerceIn(30, (aeSupported.firstOrNull() ?: 60))
+            // 同时检查高速视频 FPS（不覆盖 UI 的 _supportedFps，只用于判断当前相机能否满足请求）
+            val highSpeedFps = collectHighSpeedFps(chars)
+            val maxAvailableFps = maxOf(maxNormalFps, highSpeedFps.maxOrNull() ?: 0)
+            if (highSpeedFps.isNotEmpty()) {
+                DebugLog.d(TAG, "摄像头 $cameraId 高速视频 FPS: $highSpeedFps, 综合最大帧率: ${maxAvailableFps}fps")
+            }
+
+            // 核心修复：请求帧率超过 AE 普通模式最大值时，需要高速视频会话
+            // 当前未实现高速视频会话，因此 clamp 到 maxNormalFps 并设置对应 AE Range
+            // 否则 cameraFps 虚高导致 skipPattern 计算错误，实际录制帧率远低于预期
+            val actualFps: Int
+            val aeRange: android.util.Range<Int>?
+
+            if (requestedFps > maxNormalFps) {
+                // 请求帧率超过 AE 普通模式能力，需要高速视频会话（未实现）
+                // 暂时 clamp 到 maxNormalFps，设置对应的 AE Range 确保实际输出达到上限
+                actualFps = maxNormalFps.coerceAtLeast(30)
+                // 找上限 = actualFps 的最窄 Range（如 [60,60] 或 [30,60]），确保达到目标帧率
+                aeRange = fpsRanges
+                    .filter { it.upper == actualFps && it.lower >= 14 }
+                    .maxByOrNull { it.lower }  // 优先选下限较高的（更窄，更稳定）
+                    ?: fpsRanges
+                        .filter { it.upper >= actualFps }
+                        .minByOrNull { it.lower }
+                DebugLog.w(TAG, "请求 ${requestedFps}fps > AE 最大 ${maxNormalFps}fps，" +
+                    "需要高速视频会话（未实现），降级到 ${actualFps}fps，" +
+                    "AE Range: ${aeRange?.let { "[${it.lower},${it.upper}]" } ?: "null"}")
+                return Pair(actualFps, aeRange)
+            } else {
+                actualFps = requestedFps.coerceIn(30, maxNormalFps)
+            }
 
             // 高分辨率（≥4K）：设置宽 AE Range 确保帧率稳定
             // 4K 不设 AE Range 时 HAL 帧率不稳定，实测可能只有 15fps
@@ -1394,6 +1513,26 @@ class CameraController(private val context: Context) {
         } catch (e: Exception) {
             DebugLog.w(TAG, "查询摄像头帧率失败，退回 30fps: ${e.message}")
             return Pair(requestedFps.coerceAtMost(30), null)
+        }
+    }
+
+    /**
+     * 收集指定相机的高速视频 FPS 值
+     *
+     * 通过 StreamConfigurationMap.getHighSpeedVideoFpsRanges() 获取。
+     * 魅族等厂商的 HAL 在普通 AE Range 中只报告 30fps，但通过 HIGH_SPEED_VIDEO 支持 60fps。
+     * 注意：高速视频通常只在特定分辨率（720p/1080p）下可用，4K 一般不支持。
+     *
+     * @return 高速视频模式下支持的 FPS 值集合（≥60）
+     */
+    private fun collectHighSpeedFps(chars: CameraCharacteristics): Set<Int> {
+        return try {
+            val configMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return emptySet()
+            val highSpeedFpsRanges = configMap.highSpeedVideoFpsRanges
+            highSpeedFpsRanges.map { it.upper }.filter { it >= 60 }.toSet()
+        } catch (e: Exception) {
+            DebugLog.w(TAG, "查询高速视频 FPS 失败: ${e.message}")
+            emptySet()
         }
     }
 

@@ -99,8 +99,12 @@ class RingBufferRecorder(
 
     /** 始终使用 Surface 输入模式（零拷贝）
      *  Camera2 直接输出到编码器 InputSurface，绕过 YUV 转换，所有分辨率帧率稳定。
+     *
+     *  注意：当 Surface 模式准备失败降级到 ByteBuffer 时，此值需设为 false，
+     *  否则 PreRecordManager.feedFrame() 会因 useSurfaceInput=true 而丢弃所有帧。
      */
-    val useSurfaceInput: Boolean = true
+    @Volatile
+    var useSurfaceInput: Boolean = true
 
     /** 编码器输出格式中的 CSD-0（SPS），从 INFO_OUTPUT_FORMAT_CHANGED 提取 */
     @Volatile
@@ -472,9 +476,10 @@ class RingBufferRecorder(
     /** 停止编码器 */
     fun stop() {
         isRunning = false
-        // Surface 模式：释放 inputSurface 触发 EOS，drainEncoder 检测到后退出
-        inputSurface?.release()
-        inputSurface = null
+        // 关键修复：先 stop/release 编码器，再释放 inputSurface
+        // 原因：Surface 模式下 inputSurface 由编码器持有，编码器还可能在消费 Surface 上的帧。
+        // 先释放 Surface 再停编码器会导致部分硬件上编码器输出不完整或崩溃。
+        // 参考：https://developer.android.com/reference/android/media/MediaCodec#createInputSurface()
         try {
             encoder?.stop()
         } catch (_: Exception) {
@@ -482,6 +487,9 @@ class RingBufferRecorder(
         }
         encoder?.release()
         encoder = null
+        // 编码器停止后再释放 Surface（触发 EOS 信号由编码器内部控制）
+        inputSurface?.release()
+        inputSurface = null
         isPrepared = false
     }
 
