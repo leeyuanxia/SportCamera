@@ -1249,7 +1249,11 @@ class CameraController(private val context: Context) {
                 return cameraId
             }
         }
-        return "0" // 兜底
+        // 兜底：使用系统 cameraIdList 中第一个匹配的，或首个相机
+        val firstMatch = cameraManager.cameraIdList.firstOrNull {
+            cameraManager.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == targetFacing
+        }
+        return firstMatch ?: cameraManager.cameraIdList.firstOrNull() ?: "0"
     }
 
     /**
@@ -1552,6 +1556,13 @@ class CameraController(private val context: Context) {
 
         DebugLog.d(TAG, "Surface FPS 解析: 可用范围=${fpsRanges.map { "[${it.lower},${it.upper}]" }}, 请求=$fps")
 
+        // 防御：某些设备 fpsRanges 为空数组，构造的 [fps,fps] 可能不被 HAL 支持
+        // 此时返回 null，由调用方（rebuildCaptureRequest）跳过 AE Range 设置
+        if (fpsRanges.isEmpty()) {
+            DebugLog.w(TAG, "Surface FPS: fpsRanges 为空！无法设置 AE Range")
+            return android.util.Range(30, 30)  // 安全兜底
+        }
+
         // 优先选择上限 ≥ fps 的范围中，下限最低的（宽 Range）
         // 例如请求 24fps，[15,30] 优于 [24,30] 优于 [30,30]
         // 宽 Range 给 HAL 更大灵活性，避免固定帧率时的传感器模式切换导致 FOV 变化
@@ -1563,8 +1574,13 @@ class CameraController(private val context: Context) {
             return wideRange
         }
 
-        // 最终降级
-        DebugLog.w(TAG, "Surface FPS: 无匹配范围，使用构造值 [$fps,$fps]")
+        // 最终降级：使用可用的最大 Range
+        val fallback = fpsRanges.maxByOrNull { it.upper }
+        if (fallback != null) {
+            DebugLog.w(TAG, "Surface FPS: 无匹配范围，使用可用最大 Range [${fallback.lower},${fallback.upper}]")
+            return fallback
+        }
+        DebugLog.w(TAG, "Surface FPS: 全部降级失败，使用构造值 [$fps,$fps]")
         return android.util.Range(fps, fps)
     }
 

@@ -240,7 +240,12 @@ class ActiveRecorder(
                 }
             }
         } catch (e: Exception) {
-            DebugLog.w(TAG, "drainEncoder 退出 (drain了${drainCount}帧): ${e.message}")
+            if (e is kotlinx.coroutines.CancellationException) {
+                DebugLog.d(TAG, "drainEncoder 被取消 (drain了${drainCount}帧)")
+                throw e
+            } else {
+                DebugLog.w(TAG, "drainEncoder 异常退出 (drain了${drainCount}帧): ${e.message}")
+            }
         } finally {
             try { codec.stop() } catch (_: Exception) {}
             codec.release()

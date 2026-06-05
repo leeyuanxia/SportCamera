@@ -182,6 +182,8 @@ object YuvConverter {
         dstW: Int, dstH: Int, reuse: ByteArray? = null,
     ): ByteArray {
         if (srcW == dstW && srcH == dstH) return src
+        // 防御性检查：任何维度为 0 会导致除零和数组越界
+        if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) return src
 
         val srcAspect = srcW.toDouble() / srcH
         val dstAspect = dstW.toDouble() / dstH

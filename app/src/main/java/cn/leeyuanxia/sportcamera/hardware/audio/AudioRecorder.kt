@@ -10,6 +10,7 @@ import cn.leeyuanxia.sportcamera.util.DebugLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentLinkedDeque
 
 /**
  * 音频录制编码器 — 采集麦克风 PCM 并编码为 AAC
@@ -53,7 +54,8 @@ class AudioRecorder {
     @Volatile
     private var isRunning = false
 
-    private val frames = mutableListOf<EncodedAudioFrame>()
+    /** 线程安全的帧缓冲区：drainEncoder()（IO线程）写入，dumpRecentFrames()（主线程）读取 */
+    private val frames = ConcurrentLinkedDeque<EncodedAudioFrame>()
 
     /** 录制开始时的 nanoTime 基准（微秒），用于 PTS 计算 */
     @Volatile
@@ -164,6 +166,7 @@ class AudioRecorder {
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) {
                 DebugLog.d(TAG, "采集协程被取消 (已喂入${feedCount}次)")
+                throw e  // 必须重抛，违反协程取消约定会导致父协程无法感知取消
             } else {
                 DebugLog.e(TAG, "采集异常: ${e.message}", e)
             }
@@ -231,6 +234,7 @@ class AudioRecorder {
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) {
                 DebugLog.d(TAG, "音频 drain 被取消")
+                throw e  // 必须重抛，违反协程取消约定
             } else {
                 DebugLog.w(TAG, "音频 drain 异常: ${e.message}")
             }

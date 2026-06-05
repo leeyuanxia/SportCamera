@@ -317,7 +317,8 @@ class VoiceTriggerRecorder(
                 if (allFrames.isEmpty()) {
                     DebugLog.e(TAG, "录像数据为空")
                     _appState.value = AppState.Error("录像数据为空")
-                    delay(2000)
+                    // 显示错误 1 秒后自动恢复（delay 可被协程取消中断）
+                    delay(1000)
                     restartStandby()
                     return@launch
                 }

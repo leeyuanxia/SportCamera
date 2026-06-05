@@ -380,8 +380,10 @@ class RingBufferRecorder(
         }
         } catch (e: Exception) {
             // 协程取消是正常行为（如 onWakeWordDetected 取消 drainJob），不作为错误
+            // 关键：CancellationException 必须重抛，否则父协程无法感知取消，违反协程约定
             if (e is kotlinx.coroutines.CancellationException) {
                 DebugLog.d(TAG, "drainEncoder 被取消 (已 drain ${drainCount} 帧)")
+                throw e
             } else {
                 DebugLog.w(TAG, "drainEncoder 异常退出 (drain了${drainCount}帧): ${e.message}")
             }

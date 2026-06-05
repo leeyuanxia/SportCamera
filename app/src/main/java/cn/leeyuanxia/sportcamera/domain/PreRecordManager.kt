@@ -59,6 +59,7 @@ class PreRecordManager : FrameConsumer {
      * 回调在 FrameAnalyzer 线程（ensureEncoder → createBuffer）中触发，
      * 回调内需要切换到协程调度器才能调用 CameraController 的 suspend 方法。
      */
+    @Volatile
     var encoderSurfaceReady: ((Surface) -> Unit)? = null
 
     /** 当前是否处于 Surface 模式 */

@@ -45,7 +45,8 @@ class ThermalThrottler(private val context: Context) {
     @Volatile
     private var profileBitrateBps: Int = 3_000_000
 
-    /** 当前热等级 */
+    /** 当前热等级 — Thermal binder线程写，setProfileParams主线程读，需 @Volatile */
+    @Volatile
     private var currentThermalStatus: Int = PowerManager.THERMAL_STATUS_NONE
 
     private val _config = MutableStateFlow(ThrottleConfig(30, 3_000_000, 100))
