@@ -1162,4 +1162,154 @@ private var frameSampleCount = 0
 
 - 之前：假设 30fps，实际 19fps → 计算错误 → 帧 10-13fps ✗
 - 之后：测量 19fps，基于 19fps 计算 → 实际 19fps ✓
+
+### 2026-06-05：修复 90fps 录制仅 30fps + 后台闪退 + 全面并发审计
+
+**提交**: `b775b27`（10个修复）+ `338a8af`（8个修复）
+
+---
+
+#### 一、90fps 录制只有 30fps（FPS 检测/计算回归）
+
+**问题背景**：
+用户选择 720p@90fps，录制出只有 30fps。日志显示 AE 普通模式最大 60fps，
+高速视频支持 [120,240,480]（无 90fps）。
+
+**根因分析**：
+1. `collectAllSupportedFps()` 将 90fps 作为"中间帧率"插值加入 UI（因为 90 ≤ 480），
+   但硬件 AE 普通模式最大 60fps，高速视频列表中无 90fps
+2. `resolveActualFpsFromCameraId()` 返回 `actualFps=90`，但 AE Range=null（低分辨率），
+   HAL 默认输出 30fps，远低于预期
+3. `setTargetFps()` 使用整数除法 `cameraFps/fps`（30/90=0→coerce 1），
+   `ceil()` 修复在上次改动中被回归
+
+**修改文件：**
+- `hardware/camera/CameraController.kt` — `collectAllSupportedFps`、`resolveActualFpsFromCameraId`
+- `hardware/camera/CameraFramePipeline.kt` — `setTargetFps` 重新添加 ceil
+
+**改动内容：**
+
+1. **`collectAllSupportedFps()` 限制自动补全范围**：
+   - 新增 `maxAeFps`（所有相机 AE 普通模式最大帧率）限制
+   - 只自动补全 ≤ `maxAeFps` 的中间帧率
+   - > `maxAeFps` 的值必须来自实际高速视频 FPS 列表（如 120/240/480）
+   - 90fps 不在高速视频列表中 → UI 不再显示
+
+2. **`resolveActualFpsFromCameraId()` 降级策略**：
+   - 当 `requestedFps > maxNormalFps`（AE 普通上限）：clamp 到 `maxNormalFps`
+   - 设置对应的 AE Range 确保实际输出达到上限
+   - 记录 WARNING 日志说明需要高速视频会话（未实现）
+
+3. **`setTargetFps()` ceil 修复**：
+   - 从 `(cameraFps / fps).coerceAtLeast(1)` 改回 `ceil(cameraFps.toDouble() / fps).toInt()`
+   - 添加 `import kotlin.math.ceil`
+
+---
+
+#### 二、后台回来闪退（CameraPreview 双重启动）
+
+**问题背景**：
+后台回来时 730ms 内触发 3 次 bindPreview + 1 次 initialize()，MIUI 游戏助推器
+报 `hookDetectUnsafeAppStart`（系统级错误），并发 bindCamera 导致状态混乱。
+
+**根因分析**：
+`CameraPreview.kt` 中 `LaunchedEffect` 使用 `scope.launch` + `withContext(NonCancellable)`：
+- LaunchedEffect key 变化（orientation）时，旧 LaunchedEffect 被取消
+- 但 `NonCancellable` 阻止旧 `onBindCamera` 被取消 → 旧协程继续执行
+- 新 LaunchedEffect 同时启动 → 两个 bindCamera 并发执行
+- `CameraViewModel.initialize()` 在 Activity 重建时被重复调用
+
+**修改文件：**
+- `ui/component/CameraPreview.kt` — 重构 LaunchedEffect 绑定逻辑
+- `viewmodel/CameraViewModel.kt` — `bindCamera` 添加 `isBinding` 并发守卫
+
+**改动内容：**
+
+1. **CameraPreview 双重启动修复**：
+   - 移除 `scope.launch` + `withContext(NonCancellable)`
+   - 直接使用 `LaunchedEffect` 作为协程作用域，取消时自动清理
+   - 新增 `lastBoundTv`/`lastBoundOrientation` 去重守卫：同一参数跳过重复绑定
+
+2. **CameraViewModel 并发守卫**：
+   - 新增 `@Volatile var isBinding: Boolean = false`
+   - `bindCamera()` 入口检查 `isBinding`，防止并发重入
+   - `finally` 块确保标志位正确重置
+
+---
+
+#### 三、8 个严重/高危并发与资源问题
+
+**修改文件：**
+- `domain/PreRecordManager.kt` — drainLoop 竞态、ensureEncoder 竞态、encoderSurfaceReady @Volatile
+- `hardware/camera/RingBufferRecorder.kt` — useSurfaceInput 可变、inputSurface 释放顺序
+- `hardware/camera/CameraController.kt` — rebuildCaptureRequest 无锁、fpsRangeWasSetOnBind @Volatile
+- `hardware/camera/CameraFramePipeline.kt` — setTargetFps/setCameraFps 顺序依赖
+- `domain/VoiceTriggerRecorder.kt` — Surface 降级标志覆盖
+
+**改动内容：**
+
+1. **drainLoop 热管理竞态（严重）** — `PreRecordManager.kt`：
+   - `updateThrottleConfig()` 中在 `ringBuffer?.stop()` 之前**先递增 `ringBufferGeneration`**
+   - 确保 drainLoop 在 drainEncoder 返回后能感知重建请求
+   - 消除 drainLoop 在窗口期内误判退出的竞态窗口
+
+2. **useSurfaceInput 硬编码 + 降级死代码（严重）** — `RingBufferRecorder.kt` + `PreRecordManager.kt`：
+   - `useSurfaceInput` 从 `val` 改为 `@Volatile var`
+   - `createBufferInternal()` 降级 catch 块中设置 `recorder.useSurfaceInput = false`
+   - 确保 Surface→ByteBuffer 降级后 `feedFrame()` 能正常处理帧
+
+3. **inputSurface 释放顺序（严重）** — `RingBufferRecorder.kt`：
+   - `stop()` 改为**先 `encoder?.stop()` → `encoder?.release()`，再 `inputSurface?.release()`**
+   - 符合 Android MediaCodec 文档要求，防止部分硬件崩溃
+
+4. **ensureEncoder check-then-act 竞态（高）** — `PreRecordManager.kt`：
+   - 新增 `encoderLock`（`Any`），`ensureEncoder()` 和 `updateThrottleConfig()` 通过 `synchronized(encoderLock)` 保护
+   - 防止 Thermal 回调线程和 Camera2 HandlerThread 同时通过 `!drainStarted` 检查
+   - 提取 `createBufferInternal()`：不获取锁/不递增 generation 的内部方法
+
+5. **rebuildCaptureRequest 无锁并发（高）** — `CameraController.kt`：
+   - 新增 `requestLock`（`Any`），`rebuildCaptureRequest()` 和 `stopCamera2Session()` 通过 `synchronized(requestLock)` 保护
+   - 防止热管理/手势/EIS 三线程并发访问 Camera2 session → `IllegalStateException` 崩溃
+
+6. **setTargetFps/setCameraFps 顺序依赖（高）** — `CameraFramePipeline.kt`：
+   - 新增 `@Volatile var lastTargetFps: Int = 30`
+   - `setCameraFps()` 更新 cameraFps 后**自动重新计算 skipPattern**
+   - 解决热管理在 bindPreview 完成前发出配置时使用过时 `cameraFps=30` 的问题
+
+7. **fpsRangeWasSetOnBind 缺少 @Volatile（高）** — `CameraController.kt`：
+   - 添加 `@Volatile` 注解，确保热管理/手势线程能正确读取绑定线程写入的值
+
+8. **Surface 降级后标志位覆盖（高）** — `VoiceTriggerRecorder.kt`：
+   - `enterStandby()` 中 `createSurfaceEncoder()` 后检查 `preRecordManager.isSurfaceMode`
+   - 只在 Surface 模式**实际成功**时设 `framePipeline.setSurfaceMode(true)`
+   - 降级到 ByteBuffer 时走传统的 `markReadyToCreate` + `setEncoder` 路径
+
+---
+
+#### 四、8 个中低优先级防御性修复
+
+**修改文件：**
+- `hardware/audio/AudioRecorder.kt` — 线程安全 + CancellationException
+- `hardware/camera/RingBufferRecorder.kt` — CancellationException
+- `hardware/camera/ActiveRecorder.kt` — CancellationException
+- `hardware/camera/FrameConsumer.kt` — 除零防御
+- `hardware/camera/CameraController.kt` — 兜底 ID + FPS Range 防御
+- `domain/VoiceTriggerRecorder.kt` — delay 优化
+- `power/ThermalThrottler.kt` — @Volatile
+
+**改动内容：**
+
+1. **AudioRecorder 线程安全**：`frames` 从 `mutableListOf` → `ConcurrentLinkedDeque`
+2. **PreRecordManager.encoderSurfaceReady**：添加 `@Volatile`
+3. **ThermalThrottler.currentThermalStatus**：添加 `@Volatile`
+4. **CancellationException 重抛**：`RingBufferRecorder`、`ActiveRecorder`、`AudioRecorder`（2处）
+   共 4 处 catch 块中 `CancellationException` 现在正确重抛
+5. **cropAndScaleNv12 除零防御**：添加 `srcW/srcH/dstW/dstH <= 0` 前置检查
+6. **resolveSurfaceFpsRange 空数组防御**：`fpsRanges.isEmpty()` 时返回安全兜底 `[30,30]`
+7. **resolveCameraId 兜底 ID**：从硬编码 `"0"` 改为 `cameraIdList.firstOrNull()?: "0"`
+8. **录像数据为空 delay**：从 2s 缩短到 1s
+
+**编译结果**：
+- ✅ BUILD SUCCESSFUL（两轮均通过）
+- ⚠️ 仅 2 个 deprecated API 警告（不影响功能）
 - 可能略低于目标 30fps，但这是 HAL 的实际限制，不应强制
