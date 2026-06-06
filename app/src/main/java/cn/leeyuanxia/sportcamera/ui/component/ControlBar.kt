@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -185,14 +186,15 @@ private fun SettingsPanel(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .then(if (isLandscape) Modifier.verticalScroll(rememberScrollState()) else Modifier)
+            .then(if (isLandscape) Modifier else Modifier.heightIn(max = 230.dp))
+            .verticalScroll(rememberScrollState())
             .clip(RoundedCornerShape(16.dp))
             .background(CardGray)
-            .padding(if (isLandscape) 8.dp else 12.dp),
+            .padding(if (isLandscape) 8.dp else 10.dp),
     ) {
         // ===== 预录时长：预设 Chips + 自定义 Slider =====
         SectionLabel("预录时长", compact = isLandscape)
-        Spacer(Modifier.height(if (isLandscape) 4.dp else 6.dp))
+        Spacer(Modifier.height(4.dp))
 
         // 预设 Chips — 平分宽度居中
         Row(
@@ -209,7 +211,7 @@ private fun SettingsPanel(
             }
         }
 
-        Spacer(Modifier.height(if (isLandscape) 4.dp else 8.dp))
+        Spacer(Modifier.height(4.dp))
 
         // 自定义 Slider — 手动填写时间
         var sliderSeconds by remember(selectedDuration) {
@@ -246,15 +248,13 @@ private fun SettingsPanel(
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
-        if (!isLandscape) {
-            Text(
-                text = "唤醒后自动保存前后各 ${selectedDuration.seconds / 2} 秒的片段",
-                color = TextTertiary,
-                style = MaterialTheme.typography.labelSmall,
-            )
-        }
+        Text(
+            text = "唤醒后自动保存前后各 ${selectedDuration.seconds / 2} 秒的片段",
+            color = TextTertiary,
+            style = MaterialTheme.typography.labelSmall,
+        )
 
-        Spacer(Modifier.height(if (isLandscape) 6.dp else 12.dp))
+        Spacer(Modifier.height(if (isLandscape) 6.dp else 8.dp))
 
         // ===== 画质：分辨率 + 帧率 =====
         SettingsQualitySection(
@@ -264,11 +264,11 @@ private fun SettingsPanel(
             isLandscape = isLandscape,
         )
 
-        Spacer(Modifier.height(if (isLandscape) 6.dp else 12.dp))
+        Spacer(Modifier.height(if (isLandscape) 6.dp else 8.dp))
 
         // ===== 方向 =====
         SectionLabel("录制方向", compact = isLandscape)
-        Spacer(Modifier.height(if (isLandscape) 4.dp else 6.dp))
+        Spacer(Modifier.height(4.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly,
@@ -283,11 +283,11 @@ private fun SettingsPanel(
             }
         }
 
-        Spacer(Modifier.height(if (isLandscape) 6.dp else 12.dp))
+        Spacer(Modifier.height(if (isLandscape) 6.dp else 8.dp))
 
         // ===== 视频防抖 =====
         SectionLabel("视频防抖", compact = isLandscape)
-        Spacer(Modifier.height(if (isLandscape) 4.dp else 6.dp))
+        Spacer(Modifier.height(4.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly,
@@ -360,7 +360,7 @@ private fun SettingsQualitySection(
     val availableFps = availableFpsForRes(currentHeight).intersect(supportedFps)
 
     SectionLabel("画质", compact = isLandscape)
-    Spacer(Modifier.height(if (isLandscape) 4.dp else 6.dp))
+    Spacer(Modifier.height(4.dp))
 
     // 分辨率 — 平分宽度居中
     Row(
@@ -381,7 +381,7 @@ private fun SettingsQualitySection(
         }
     }
 
-    Spacer(Modifier.height(if (isLandscape) 4.dp else 6.dp))
+    Spacer(Modifier.height(4.dp))
 
     // 帧率 — 平分宽度居中（不可用的灰显）
     Row(
@@ -445,8 +445,8 @@ private fun Chip(
             .background(bgColor)
             .then(if (enabled) Modifier.clickable { onClick() } else Modifier)
             .padding(
-                horizontal = if (compact) 8.dp else 12.dp,
-                vertical = if (compact) 4.dp else 6.dp,
+                horizontal = if (compact) 8.dp else 10.dp,
+                vertical = if (compact) 4.dp else 5.dp,
             ),
         contentAlignment = Alignment.Center,
     ) {
