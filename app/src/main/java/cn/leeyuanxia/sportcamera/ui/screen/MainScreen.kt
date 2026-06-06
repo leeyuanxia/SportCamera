@@ -10,15 +10,18 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import android.content.res.Configuration
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -33,6 +36,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import cn.leeyuanxia.sportcamera.domain.AppState
@@ -82,6 +86,7 @@ fun MainScreen(viewModel: CameraViewModel) {
     val context = LocalContext.current
     val activity = context as? ComponentActivity
 
+    val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     val isActive = appState is AppState.Standby || appState.isRecording
 
     // 屏幕亮度和常亮控制
@@ -172,67 +177,119 @@ fun MainScreen(viewModel: CameraViewModel) {
 
             // 仅在活跃状态（待机/录制）时显示以下层
             if (uiVisible) {
-                // Layer 2: 待机叠加层（预览隐藏时的状态指示）
-                if (appState is AppState.Standby && !previewVisible) {
-                    StandbyOverlay(
-                        modifier = Modifier.fillMaxSize(),
+                if (isLandscape) {
+                    // === 横屏布局：右侧半透明控制面板 ===
+                    if (appState is AppState.Standby && !previewVisible) {
+                        StandbyOverlay(
+                            modifier = Modifier.fillMaxSize(),
+                            appState = appState,
+                            batteryLevel = batteryLevel,
+                        )
+                    }
+                    RecordIndicator(
+                        modifier = Modifier.align(Alignment.Center),
                         appState = appState,
+                    )
+                    // 右侧控制面板
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .fillMaxHeight()
+                            .width(240.dp)
+                            .background(Color.Black.copy(alpha = 0.75f))
+                            .statusBarsPadding()
+                            .navigationBarsPadding(),
+                    ) {
+                        StatusBar(
+                            modifier = Modifier.fillMaxWidth(),
+                            appState = appState,
+                            preRecordDuration = preRecordDuration,
+                            availableLenses = availableLenses,
+                            currentLens = currentLens,
+                            zoomRatio = zoomRatio,
+                            batteryLevel = batteryLevel,
+                            onLensSwitch = viewModel::switchLens,
+                        )
+                        ControlBar(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f),
+                            appState = appState,
+                            selectedDuration = preRecordDuration,
+                            selectedProfile = resolutionProfile,
+                            selectedOrientation = recordOrientation,
+                            supportedFps = supportedFps,
+                            videoStabilization = videoStabilization,
+                            eisSupported = eisSupported,
+                            previewVisible = previewVisible,
+                            onStartStandby = viewModel::startStandby,
+                            onStopStandby = viewModel::stopStandby,
+                            onPeekPreview = viewModel::peekPreview,
+                            onToggleUi = viewModel::toggleUi,
+                            onDurationChanged = viewModel::setPreRecordDuration,
+                            onResolutionChanged = viewModel::setResolutionProfile,
+                            onOrientationChanged = viewModel::setRecordOrientation,
+                            onVideoStabilizationChanged = viewModel::setVideoStabilization,
+                            onRequestBatteryOptimization = {
+                                viewModel.requestBatteryOptimization(context)
+                            },
+                            needsBatteryOptimization = viewModel.needsBatteryOptimization,
+                            isLandscape = true,
+                        )
+                    }
+                } else {
+                    // === 竖屏布局：原有层级结构 ===
+                    if (appState is AppState.Standby && !previewVisible) {
+                        StandbyOverlay(
+                            modifier = Modifier.fillMaxSize(),
+                            appState = appState,
+                            batteryLevel = batteryLevel,
+                        )
+                    }
+                    StatusBar(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .fillMaxWidth()
+                            .statusBarsPadding(),
+                        appState = appState,
+                        preRecordDuration = preRecordDuration,
+                        availableLenses = availableLenses,
+                        currentLens = currentLens,
+                        zoomRatio = zoomRatio,
                         batteryLevel = batteryLevel,
+                        onLensSwitch = viewModel::switchLens,
+                    )
+                    RecordIndicator(
+                        modifier = Modifier.align(Alignment.Center),
+                        appState = appState,
+                    )
+                    ControlBar(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .navigationBarsPadding(),
+                        appState = appState,
+                        selectedDuration = preRecordDuration,
+                        selectedProfile = resolutionProfile,
+                        selectedOrientation = recordOrientation,
+                        supportedFps = supportedFps,
+                        videoStabilization = videoStabilization,
+                        eisSupported = eisSupported,
+                        previewVisible = previewVisible,
+                        onStartStandby = viewModel::startStandby,
+                        onStopStandby = viewModel::stopStandby,
+                        onPeekPreview = viewModel::peekPreview,
+                        onToggleUi = viewModel::toggleUi,
+                        onDurationChanged = viewModel::setPreRecordDuration,
+                        onResolutionChanged = viewModel::setResolutionProfile,
+                        onOrientationChanged = viewModel::setRecordOrientation,
+                        onVideoStabilizationChanged = viewModel::setVideoStabilization,
+                        onRequestBatteryOptimization = {
+                            viewModel.requestBatteryOptimization(context)
+                        },
+                        needsBatteryOptimization = viewModel.needsBatteryOptimization,
                     )
                 }
-
-                // Layer 3: 顶部状态栏 + 镜头切换
-                StatusBar(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .fillMaxWidth()
-                        .then(
-                            if (appState is AppState.Standby)
-                                Modifier.statusBarsPadding()
-                            else Modifier.statusBarsPadding()
-                        ),
-                    appState = appState,
-                    preRecordDuration = preRecordDuration,
-                    availableLenses = availableLenses,
-                    currentLens = currentLens,
-                    zoomRatio = zoomRatio,
-                    batteryLevel = batteryLevel,
-                    onLensSwitch = viewModel::switchLens,
-                )
-
-                // Layer 4: 中央录制指示器
-                RecordIndicator(
-                    modifier = Modifier.align(Alignment.Center),
-                    appState = appState,
-                )
-
-                // Layer 5: 底部控制栏
-                ControlBar(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .navigationBarsPadding(),
-                    appState = appState,
-                    selectedDuration = preRecordDuration,
-                    selectedProfile = resolutionProfile,
-                    selectedOrientation = recordOrientation,
-                    supportedFps = supportedFps,
-                    videoStabilization = videoStabilization,
-                    eisSupported = eisSupported,
-                    previewVisible = previewVisible,
-                    onStartStandby = viewModel::startStandby,
-                    onStopStandby = viewModel::stopStandby,
-                    onPeekPreview = viewModel::peekPreview,
-                    onToggleUi = viewModel::toggleUi,
-                    onDurationChanged = viewModel::setPreRecordDuration,
-                    onResolutionChanged = viewModel::setResolutionProfile,
-                    onOrientationChanged = viewModel::setRecordOrientation,
-                    onVideoStabilizationChanged = viewModel::setVideoStabilization,
-                    onRequestBatteryOptimization = {
-                        viewModel.requestBatteryOptimization(context)
-                    },
-                    needsBatteryOptimization = viewModel.needsBatteryOptimization,
-                )
             }
         }
     }

@@ -57,11 +57,15 @@ fun StatusBar(
     batteryLevel: Int,
     onLensSwitch: (CameraLens) -> Unit,
     modifier: Modifier = Modifier,
+    isLandscape: Boolean = false,
 ) {
     Column(
         modifier = modifier
             .background(SurfaceOverlay)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+            .padding(
+                horizontal = if (isLandscape) 10.dp else 16.dp,
+                vertical = if (isLandscape) 4.dp else 8.dp,
+            ),
     ) {
         // 第一行：状态灯 + 电量 + 时长
         Row(
@@ -119,16 +123,17 @@ fun StatusBar(
 
         // 第二行：镜头选择（仅多镜头时显示）
         if (availableLenses.size > 1) {
+            // 横屏只显示可用镜头，竖屏显示全部（不可用的灰显）
+            val displayLenses = if (isLandscape) availableLenses else CameraLens.entries
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 6.dp),
+                    .padding(top = if (isLandscape) 3.dp else 6.dp),
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                CameraLens.entries.forEach { lens ->
+                displayLenses.forEachIndexed { index, lens ->
                     val isAvailable = lens in availableLenses
-                    // 镜头选中状态：直接绑定的看 currentLens，缩放中的看 zoomRatio
                     val isSelected = when {
                         !isAvailable -> false
                         currentLens == CameraLens.FRONT -> lens == CameraLens.FRONT
@@ -140,7 +145,7 @@ fun StatusBar(
 
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
+                            .clip(RoundedCornerShape(if (isLandscape) 8.dp else 12.dp))
                             .background(
                                 when {
                                     isSelected -> ChipSelected
@@ -152,7 +157,10 @@ fun StatusBar(
                                 if (isAvailable) Modifier.clickable { onLensSwitch(lens) }
                                 else Modifier
                             )
-                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                            .padding(
+                                horizontal = if (isLandscape) 6.dp else 10.dp,
+                                vertical = if (isLandscape) 2.dp else 4.dp,
+                            ),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
@@ -162,13 +170,15 @@ fun StatusBar(
                                 isAvailable -> TextPrimary
                                 else -> TextSecondary.copy(alpha = 0.3f)
                             },
-                            style = MaterialTheme.typography.labelLarge,
+                            style = if (isLandscape) MaterialTheme.typography.labelSmall
+                            else MaterialTheme.typography.labelLarge,
                             fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                            maxLines = 1,
                         )
                     }
 
-                    if (lens != CameraLens.entries.last()) {
-                        Spacer(Modifier.width(6.dp))
+                    if (index < displayLenses.lastIndex) {
+                        Spacer(Modifier.width(if (isLandscape) 3.dp else 6.dp))
                     }
                 }
             }

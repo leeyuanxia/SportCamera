@@ -2,11 +2,10 @@ package cn.leeyuanxia.sportcamera.ui.component
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -14,8 +13,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -75,13 +76,17 @@ fun ControlBar(
     onRequestBatteryOptimization: () -> Unit,
     needsBatteryOptimization: Boolean,
     modifier: Modifier = Modifier,
+    isLandscape: Boolean = false,
 ) {
     val isStandby = appState is AppState.Standby
     val isIdle = appState is AppState.Idle
 
     Column(
         modifier = modifier
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(
+                horizontal = if (isLandscape) 8.dp else 16.dp,
+                vertical = if (isLandscape) 4.dp else 12.dp,
+            ),
     ) {
         // ===== 设置面板：仅空闲时显示 =====
         if (isIdle) {
@@ -96,8 +101,10 @@ fun ControlBar(
                 onResolutionChanged = onResolutionChanged,
                 onOrientationChanged = onOrientationChanged,
                 onVideoStabilizationChanged = onVideoStabilizationChanged,
+                isLandscape = isLandscape,
+                modifier = if (isLandscape) Modifier.weight(1f) else Modifier,
             )
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(if (isLandscape) 6.dp else 16.dp))
         }
 
         // ===== 操作栏 =====
@@ -172,17 +179,20 @@ private fun SettingsPanel(
     onResolutionChanged: (ResolutionProfile) -> Unit,
     onOrientationChanged: (RecordOrientation) -> Unit,
     onVideoStabilizationChanged: (Boolean) -> Unit = {},
+    isLandscape: Boolean = false,
+    modifier: Modifier = Modifier,
 ) {
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
+            .then(if (isLandscape) Modifier.verticalScroll(rememberScrollState()) else Modifier)
             .clip(RoundedCornerShape(16.dp))
             .background(CardGray)
-            .padding(12.dp),
+            .padding(if (isLandscape) 8.dp else 12.dp),
     ) {
         // ===== 预录时长：预设 Chips + 自定义 Slider =====
-        SectionLabel("预录时长")
-        Spacer(Modifier.height(6.dp))
+        SectionLabel("预录时长", compact = isLandscape)
+        Spacer(Modifier.height(if (isLandscape) 4.dp else 6.dp))
 
         // 预设 Chips — 平分宽度居中
         Row(
@@ -194,11 +204,12 @@ private fun SettingsPanel(
                     label = preset.label,
                     isSelected = preset == selectedDuration,
                     onClick = { onDurationChanged(preset) },
+                    compact = isLandscape,
                 )
             }
         }
 
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(if (isLandscape) 4.dp else 8.dp))
 
         // 自定义 Slider — 手动填写时间
         var sliderSeconds by remember(selectedDuration) {
@@ -235,26 +246,29 @@ private fun SettingsPanel(
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
-        Text(
-            text = "唤醒后自动保存前后各 ${selectedDuration.seconds / 2} 秒的片段",
-            color = TextTertiary,
-            style = MaterialTheme.typography.labelSmall,
-        )
+        if (!isLandscape) {
+            Text(
+                text = "唤醒后自动保存前后各 ${selectedDuration.seconds / 2} 秒的片段",
+                color = TextTertiary,
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(if (isLandscape) 6.dp else 12.dp))
 
         // ===== 画质：分辨率 + 帧率 =====
         SettingsQualitySection(
             selectedProfile = selectedProfile,
             supportedFps = supportedFps,
             onResolutionChanged = onResolutionChanged,
+            isLandscape = isLandscape,
         )
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(if (isLandscape) 6.dp else 12.dp))
 
         // ===== 方向 =====
-        SectionLabel("录制方向")
-        Spacer(Modifier.height(6.dp))
+        SectionLabel("录制方向", compact = isLandscape)
+        Spacer(Modifier.height(if (isLandscape) 4.dp else 6.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly,
@@ -264,15 +278,16 @@ private fun SettingsPanel(
                     label = orientation.label,
                     isSelected = orientation == selectedOrientation,
                     onClick = { onOrientationChanged(orientation) },
+                    compact = isLandscape,
                 )
             }
         }
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(if (isLandscape) 6.dp else 12.dp))
 
         // ===== 视频防抖 =====
-        SectionLabel("视频防抖")
-        Spacer(Modifier.height(6.dp))
+        SectionLabel("视频防抖", compact = isLandscape)
+        Spacer(Modifier.height(if (isLandscape) 4.dp else 6.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly,
@@ -337,14 +352,15 @@ private fun SettingsQualitySection(
     selectedProfile: ResolutionProfile,
     supportedFps: Set<Int> = setOf(30),
     onResolutionChanged: (ResolutionProfile) -> Unit,
+    isLandscape: Boolean = false,
 ) {
     val currentHeight = selectedProfile.height
     val currentFps = selectedProfile.fps
     // 该分辨率下枚举定义的帧率，再与硬件支持的帧率取交集
     val availableFps = availableFpsForRes(currentHeight).intersect(supportedFps)
 
-    SectionLabel("画质")
-    Spacer(Modifier.height(6.dp))
+    SectionLabel("画质", compact = isLandscape)
+    Spacer(Modifier.height(if (isLandscape) 4.dp else 6.dp))
 
     // 分辨率 — 平分宽度居中
     Row(
@@ -360,11 +376,12 @@ private fun SettingsQualitySection(
                     else availableFpsForRes(option.height).first()
                     findProfile(option.height, fps)?.let(onResolutionChanged)
                 },
+                compact = isLandscape,
             )
         }
     }
 
-    Spacer(Modifier.height(6.dp))
+    Spacer(Modifier.height(if (isLandscape) 4.dp else 6.dp))
 
     // 帧率 — 平分宽度居中（不可用的灰显）
     Row(
@@ -382,6 +399,7 @@ private fun SettingsQualitySection(
                         findProfile(currentHeight, option.fps)?.let(onResolutionChanged)
                     }
                 },
+                compact = isLandscape,
             )
         }
     }
@@ -391,11 +409,12 @@ private fun SettingsQualitySection(
  * 节标题
  */
 @Composable
-private fun SectionLabel(text: String) {
+private fun SectionLabel(text: String, compact: Boolean = false) {
     Text(
         text = text,
         color = TextSecondary,
-        style = MaterialTheme.typography.labelMedium,
+        style = if (compact) MaterialTheme.typography.labelSmall
+        else MaterialTheme.typography.labelMedium,
     )
 }
 
@@ -408,6 +427,7 @@ private fun Chip(
     isSelected: Boolean,
     onClick: () -> Unit,
     enabled: Boolean = true,
+    compact: Boolean = false,
 ) {
     val bgColor = when {
         isSelected -> ChipSelected
@@ -424,13 +444,17 @@ private fun Chip(
             .clip(RoundedCornerShape(14.dp))
             .background(bgColor)
             .then(if (enabled) Modifier.clickable { onClick() } else Modifier)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .padding(
+                horizontal = if (compact) 8.dp else 12.dp,
+                vertical = if (compact) 4.dp else 6.dp,
+            ),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = label,
             color = textColor,
-            style = MaterialTheme.typography.labelLarge,
+            style = if (compact) MaterialTheme.typography.labelSmall
+            else MaterialTheme.typography.labelLarge,
             fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
         )
     }
