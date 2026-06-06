@@ -7,7 +7,7 @@
 **最低版本**: Android 14 (API 34) | **目标版本**: Android 16 (API 36)
 **架构**: 单 Activity + Compose UI + 手动 DI 容器 + MVVM
 **语言**: Kotlin 100%
-**构建**: Gradle 9.3.1 + AGP 9, CameraX 1.4.1, Camera2 API（4K@60fps Surface 模式）
+**构建**: Gradle 9.3.1 + AGP 9, Camera2 API（全模式统一，含 Surface 零拷贝）
 
 ---
 
@@ -46,11 +46,11 @@ app/src/main/java/cn/leeyuanxia/sportcamera/
 │   ├── audio/
 │   │   └── KwsManager.kt                # 语音唤醒管理器（sherpa-onnx KWS）
 │   ├── camera/
-│   │   ├── CameraController.kt          # CameraX + Camera2 双模式摄像头控制器
-│   │   ├── CameraFramePipeline.kt       # 帧管线（ImageAnalysis → 编码器，含 4K 零拷贝）
-│   │   ├── FrameConsumer.kt             # FrameConsumer 接口 + YuvConverter 工具
-│   │   ├── RingBufferRecorder.kt        # 环形缓冲录制器（预录核心，支持 Surface/ByteBuffer 双模式）
-│   │   └── ActiveRecorder.kt           # 高质量活跃录制器
+│   │   ├── CameraController.kt          # Camera2 摄像头控制器（纯 Camera2，支持多镜头/缩放/Surface）
+│   │   ├── CameraFramePipeline.kt       # 帧管线（ImageReader → 编码器，含 4K 零拷贝 + 实际帧率测量）
+│   │   ├── FrameConsumer.kt             # FrameConsumer 接口 + YuvConverter 工具（双线性插值缩放）
+│   │   ├── RingBufferRecorder.kt        # 环形缓冲录制器（预录核心，4K 全 Surface，其余 ByteBuffer）
+│   │   └── ActiveRecorder.kt           # 高质量活跃录制器（AVC Level 动态选择）
 │   └── storage/
 │       └── VideoStorageManager.kt       # 视频存储（MediaStore + MediaMuxer）
 │
@@ -117,14 +117,14 @@ app/src/main/java/cn/leeyuanxia/sportcamera/
 
 ### 待机模式 (Standby)
 
-#### 非 4K 分辨率（CameraX ImageAnalysis 路径）
+#### 非 4K 分辨率（Camera2 ImageReader 路径）
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ CameraX ImageAnalysis (~30fps, YUV_420_888)                    │
+│ Camera2 ImageReader (~30fps, YUV_420_888)                       │
 │     │                                                           │
 │     ▼                                                           │
-│ CameraFramePipeline.analyze()                                   │
+│ CameraFramePipeline.onImageAvailable()                          │
 │     │ ① 帧率节流: 30fps（与相机输出一致，不跳帧）                    │
 │     │ ② imageToNv12(): YUV_420_888 → NV12 (复用缓冲区)           │
 │     │ ③ cropAndScaleNv12(): 居中裁剪+缩放到目标分辨率 (复用缓冲区)  │
@@ -139,13 +139,13 @@ app/src/main/java/cn/leeyuanxia/sportcamera/
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-#### 4K@60fps（Camera2 Surface 路径，零拷贝）
+#### 4K 全系列（Camera2 Surface 路径，零拷贝）
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ Camera2 API (直接控制相机传感器)                                  │
 │     │ 创建 CaptureSession:                                       │
-│     │   Surface 1 = PreviewView TextureView (预览)               │
+│     │   Surface 1 = TextureView (预览)                           │
 │     │   Surface 2 = Encoder InputSurface (编码器直入)             │
 │     │ AE FPS Range = [60, 60]                                    │
 │     ▼                                                           │
@@ -157,7 +157,7 @@ app/src/main/java/cn/leeyuanxia/sportcamera/
 │     └── 保留最近 N 秒的关键帧完整数据                               │
 │                                                                 │
 │ CameraFramePipeline.setSurfaceMode(true)                        │
-│     └── analyze() 直接跳过（不参与编码数据流）                     │
+│     └── onImageAvailable() 直接跳过（不参与编码数据流）             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -179,7 +179,7 @@ AudioRecord (16kHz, Mono, PCM16)
 │ 2. 切换编码器: 停止预录 → 创建 ActiveRecorder(用户分辨率/帧率/码率)  │
 │    帧率恢复全帧率 (如30fps/60fps)                                  │
 │                                                                 │
-│ 3. 录制后半段: CameraX → Pipeline → ActiveRecorder → postFrames   │
+│ 3. 录制后半段: Camera2 → Pipeline → ActiveRecorder → postFrames    │
 │                                                                 │
 │ 4. 合成: preFrames + postFrames → VideoAssembler                 │
 │    → MediaMuxer 写入 MP4 (含旋转元数据)                           │
@@ -196,33 +196,35 @@ AudioRecord (16kHz, Mono, PCM16)
 管理整个应用的状态流转。负责：
 - 启动/停止前台服务、WakeLock、热管理监听
 - 编排预录 dump → 编码器切换 → 录制 → 合成 → 保存的完整流程
-- **双模式选择**：根据 `ResolutionProfile` 判断使用 CameraX（非 4K）或 Camera2 Surface（4K@60fps）
+- **双模式选择**：根据 `ResolutionProfile` 判断使用 ImageReader（非 4K）或 Camera2 Surface（4K 全系列）
 - 处理异常后自动回到待机
 
 ### CameraController — 摄像头控制器
 
-双模式摄像头管理：
-- **CameraX 模式**（默认）：`bindPreview()` 绑定 Preview + ImageAnalysis，用于非 4K 分辨率
-- **Camera2 Surface 模式**（4K@60fps）：`bindPreviewWithSurface()` 创建 Camera2 CaptureSession，
-  双 Surface 输出（预览 + 编码器 InputSurface），通过 `CONTROL_AE_TARGET_FPS_RANGE` 控制帧率
-- `updateSurfaceFps()`：Surface 模式下热管理降频（修改 AE FPS Range）
-- `rebindWithProfile()`：分辨率/帧率变更时重新绑定，Surface 模式下跳过 CameraX 重建
-- **视频防抖 (EIS)**：通过 `CONTROL_VIDEO_STABILIZATION_MODE` 开启，CameraX 路径用 Camera2Interop、
-  Camera2 路径直接在 CaptureRequest 中设置，`rebuildSurfaceCaptureRequest()` 确保热管理不丢失 EIS 设置
+Camera2 摄像头管理：
+- **统一 Camera2 API**：所有模式均通过 Camera2 API 实现，`bindPreview()` 创建 CaptureSession
+- **非 Surface 模式**：TextureView（预览）+ ImageReader（帧捕获 YUV_420_888），用于非 4K 分辨率
+- **Surface 模式**（4K 全系列）：双 Surface 输出（TextureView + 编码器 InputSurface），相机零拷贝
+- **多镜头支持**：WIDE/ULTRA_WIDE/TELEPHOTO/FRONT，超广角通过逻辑相机 + `CONTROL_ZOOM_RATIO` 实现
+- **缩放控制**：双指捏合缩放，`CONTROL_ZOOM_RATIO` + `rebuildCaptureRequest()`，物理相机模式禁用
+- `updateSurfaceFps()`：Surface 模式热管理降频（修改 AE FPS Range，不重建编码器）
+- **视频防抖 (EIS)**：通过 `CONTROL_VIDEO_STABILIZATION_MODE` 开启，直接在 CaptureRequest 中设置
+- **并发保护**：`requestLock` 保护 rebuildCaptureRequest/stopCamera2Session，`synchronized` 防止多线程崩溃
 
 ### CameraFramePipeline — 帧路由中心
 
-连接 CameraX ImageAnalysis 和编码器，单线程处理（`FrameAnalyzer` daemon 线程）。
+连接 Camera2 ImageReader 和编码器，单线程处理（`FrameAnalyzer` daemon 线程）。
 
 双路径支持：
 - **4K 零拷贝路径**：`feedFrameDirect()` — YUV 直接写入编码器输入缓冲区，省去 ~12MB ByteArray 中转
 - **普通路径**：`feedFrame()` — YUV → NV12 ByteArray → 编码器 ByteBuffer
 
-四大优化：
-- **帧率节流**: `skipPattern` 参数，待机 30fps 与录制帧率一致，保证合成视频流畅
+五大优化：
+- **实际帧率测量**：`measuredFps` 动态跟踪相机实际输出帧率，`skipPattern` 基于真实值计算
+- **帧率节流**: `skipPattern = ceil(measuredFps / targetFps)`，待机/热降频时自适应跳帧
 - **缓冲区复用**: `fullNv12Buffer` + `scaledNv12Buffer` 消除每帧 ~16MB 分配
-- **居中裁剪**: `cropAndScaleNv12()` 保持宽高比，不拉伸变形
-- **Surface 模式**: 4K@60fps 时 `setSurfaceMode(true)`，`analyze()` 跳过编码数据流
+- **双线性插值缩放**: `cropAndScaleNv12()` 使用 16.16 定点双线性插值，保持宽高比不变形
+- **Surface 模式**: 4K 全系列 `setSurfaceMode(true)`，`onImageAvailable()` 跳过编码数据流
 
 ### YuvConverter — 格式转换工具
 
@@ -242,7 +244,7 @@ AudioRecord (16kHz, Mono, PCM16)
 - 容量 = 码率 × 时长 / 8（如 3Mbps × 30s ≈ 11.25MB）
 - 溢出时从关键帧边界丢弃旧帧（保证 H.264 可解码）
 - fps/bitrate 由 ThermalThrottler 动态调整
-- `useSurfaceInput` 判断条件：`width >= 3840 && fps > 30`
+- `useSurfaceInput` 判断条件：`width >= 3840`（所有 4K 分辨率均使用 Surface 模式）
 
 #### 跨线程安全（重要）
 
@@ -251,7 +253,7 @@ AudioRecord (16kHz, Mono, PCM16)
 | 操作 | 线程 | 说明 |
 |------|------|------|
 | `createBuffer()` 创建 | `FrameAnalyzer`（相机分析线程） | 首帧到达时触发 |
-| `feedFrame()` 喂帧 | `FrameAnalyzer` | ImageAnalysis 回调 |
+| `feedFrame()` 喂帧 | `FrameAnalyzer` | ImageReader 回调 |
 | `drainLoop()` 轮询 | `Dispatchers.Main`（主线程） | 等待 ringBuffer 非 null |
 | `drainEncoder()` drain | `Dispatchers.IO` | withContext 切换到 IO |
 | `dumpPreFrames()` 读取 | `Dispatchers.Main` | 唤醒词触发时调用 |
@@ -259,6 +261,7 @@ AudioRecord (16kHz, Mono, PCM16)
 因此 `PreRecordManager` 中的以下字段**必须**标记 `@Volatile`：
 - `ringBuffer` — 相机线程写、主线程读
 - `drainStarted` — 相机线程写、主线程读（updateThrottleConfig）
+- `encoderSurfaceReady` — PreRecordManager 中，跨线程标记
 - `cameraWidth` / `cameraHeight` — 相机线程写、主线程读
 
 同样，`RingBufferRecorder` 内部的 `encoder` 字段也**必须**标记 `@Volatile`：
@@ -279,6 +282,7 @@ AudioRecord (16kHz, Mono, PCM16)
 - 使用用户选择的分辨率/帧率/码率
 - 所有编码帧收集到 `frames` 列表（不丢弃）
 - 支持 `signalEndOfStream()` 安全关闭（重试 10 次）
+- AVC Level 动态选择：`mbPerSec > 1,000,000` → Level 5.2（4K@60fps），其余 → Level 4
 - 从 `INFO_OUTPUT_FORMAT_CHANGED` 提取 CSD-0 (SPS) 和 CSD-1 (PPS)
 
 ### KwsManager — 语音唤醒

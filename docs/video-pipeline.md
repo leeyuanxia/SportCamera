@@ -2,16 +2,16 @@
 
 ## 数据流总览
 
-### 非 4K 分辨率（CameraX ImageAnalysis 路径）
+### 非 4K 分辨率（Camera2 ImageReader 路径）
 
 ```
 Camera Sensor
      │
      ▼
-CameraX ImageAnalysis (YUV_420_888, ~30fps/60fps)
+Camera2 ImageReader (YUV_420_888, ~30fps/60fps)
      │
      ▼
-CameraFramePipeline.analyze()
+CameraFramePipeline.onImageAvailable()
      │
      ├── ① 帧率节流（skipPattern）
      ├── ② 4K + 无缩放: feedFrameDirect() 零拷贝直入编码器
@@ -36,14 +36,14 @@ FrameConsumer.feedFrame(nv12, timestamp, w, h)
      VideoStorageManager → MediaStore → 系统相册
 ```
 
-### 4K@60fps（Camera2 Surface 路径，零拷贝）
+### 4K 全系列（Camera2 Surface 路径，零拷贝）
 
 ```
 Camera Sensor
      │
      ▼
 Camera2 CaptureSession
-     ├── Surface 1: PreviewView (预览)
+     ├── Surface 1: TextureView (预览)
      └── Surface 2: Encoder InputSurface (编码器直入)
             │
             ▼
@@ -53,7 +53,7 @@ Camera2 CaptureSession
             ▼
      VideoAssembler → MediaMuxer → MP4 文件
 
-注：CameraFramePipeline.setSurfaceMode(true) 后 analyze() 跳过编码数据流
+注：CameraFramePipeline.setSurfaceMode(true) 后 onImageAvailable() 跳过编码数据流
 ```
 
 ---
@@ -62,7 +62,7 @@ Camera2 CaptureSession
 
 ### YUV_420_888 格式
 
-CameraX ImageAnalysis 输出 `YUV_420_888` 格式，包含 3 个平面：
+Camera2 ImageReader 输出 `YUV_420_888` 格式，包含 3 个平面：
 
 ```
 Plane[0]: Y (亮度)     — 全分辨率 (width × height)
@@ -129,7 +129,7 @@ Step 2: UV 平面 → dst (interleaveUvToBuffer)
 
 ### 为什么需要裁剪？
 
-CameraX `setTargetResolution` 只是提示，实际分辨率取决于相机传感器。
+Camera2 `StreamConfigurationMap` 查询的分辨率只是提示，实际分辨率取决于相机传感器。
 
 ```
 示例: 请求 1920×1080 (16:9)，但相机输出 2976×2976 (1:1)
@@ -235,12 +235,12 @@ for (y in 0 until dstH) {
     feedFrame(NV12 ByteArray) → dequeueInputBuffer → queueInputBuffer
     输入超时: 1000μs (1ms)
 
-  Surface 模式（4K@60fps, width >= 3840 && fps > 30）:
+  Surface 模式（4K 全系列, width >= 3840）:
     prepareWithSurface() → createInputSurface() → Camera2 直出
     相机硬件零拷贝写入，feedFrame() 不被调用
     停止时释放 inputSurface 触发 EOS
 
-  4K 零拷贝（4K@30fps, width >= 3840 && fps <= 30）:
+  4K 零拷贝（4K@30fps ByteBuffer, width >= 3840 && fps <= 30）:
     feedFrameDirect(Image) → YUV 直接写入编码器 ByteBuffer
     输入超时: 5000μs (5ms)
 
@@ -339,10 +339,10 @@ postFrames PTS: [5000, 36666, 68333, ...]     ← ActiveRecorder
 
 | Profile | 分辨率 | 帧率 | 码率 | 编码路径 | 用途 |
 |---------|--------|------|------|---------|------|
-| HD_720P_30 | 1280×720 | 30fps | 4Mbps | CameraX ByteBuffer | 平衡画质与功耗 |
-| FHD_1080P_30 | 1920×1080 | 30fps | 8Mbps | CameraX ByteBuffer | 高清标准 |
-| FHD_1080P_60 | 1920×1080 | 60fps | 12Mbps | CameraX ByteBuffer | 高帧率运动场景 |
-| UHD_4K_30 | 3840×2160 | 30fps | 20Mbps | CameraX 零拷贝 (feedFrameDirect) | 超高清 |
+| HD_720P_30 | 1280×720 | 30fps | 4Mbps | Camera2 ImageReader | 平衡画质与功耗 |
+| FHD_1080P_30 | 1920×1080 | 30fps | 8Mbps | Camera2 ImageReader | 高清标准 |
+| FHD_1080P_60 | 1920×1080 | 60fps | 12Mbps | Camera2 ImageReader | 高帧率运动场景 |
+| UHD_4K_30 | 3840×2160 | 30fps | 20Mbps | Camera2 Surface (零拷贝直入) | 超高清 |
 | UHD_4K_60 | 3840×2160 | 60fps | 50Mbps | Camera2 Surface (零拷贝直入) | 超高清高帧率 |
 
 ### 待机模式固定参数

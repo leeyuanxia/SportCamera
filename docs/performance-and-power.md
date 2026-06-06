@@ -58,21 +58,17 @@ PARTIAL_WAKE_LOCK（部分唤醒锁）
 
 ```
 分辨率判断:
-  width >= 3840 && fps > 30 (4K@60fps)?
+  width >= 3840 (4K 全系列)?
      │
      ├── YES → Camera2 Surface 模式（零拷贝）
      │          相机 → 编码器 InputSurface（硬件零拷贝）
-     │          CameraFramePipeline.setSurfaceMode(true) → analyze() 跳过
+     │          CameraFramePipeline.setSurfaceMode(true) → onImageAvailable() 跳过
      │          帧率控制: Camera2 AE FPS Range
      │
-     └── NO  → CameraX ImageAnalysis 模式
+     └── NO  → Camera2 ImageReader 模式
                │
-               ├── width >= 3840 (4K@30fps): feedFrameDirect 零拷贝路径
-               │   YUV 直接写入编码器 ByteBuffer，省去 ~12MB ByteArray 中转
-               │
-               └── 其他分辨率: 普通路径
-                   YUV → NV12 ByteArray → 编码器 ByteBuffer
-                   帧率控制: skipPattern 跳帧
+               YUV → NV12 ByteArray → 编码器 ByteBuffer
+               帧率控制: skipPattern 跳帧（基于 measuredFps 实际帧率测量）
 ```
 
 ### 2.2 帧率节流（省 50% CPU）
@@ -316,7 +312,7 @@ CameraViewModel.monitorBattery()
 
 ### 4K@60fps Surface 模式问题
 
-**Surface 模式判断条件**: `width >= 3840 && fps > 30`
+**Surface 模式判断条件**: `width >= 3840`（所有 4K 分辨率）
 
 **关键日志**:
 - ✅ `CameraController Surface 模式: ...` — Camera2 会话创建成功
@@ -326,7 +322,7 @@ CameraViewModel.monitorBattery()
 **排查步骤**:
 1. 确认设备 Camera2 支持：`adb shell dumpsys media.camera` 查看 `SCALER_STREAM_CONFIGURATION_MAP`
 2. 确认 FPS Range 支持：设备需支持 `[60, 60]` 或包含 60 的范围
-3. 确认 PreviewView 使用 COMPATIBLE 模式（Surface 模式需要从 TextureView 获取 Surface）
+3. 确认 TextureView 已正确创建并绑定（Surface 模式需要从 TextureView 获取 Surface）
 4. 降级回 ByteBuffer 后帧率约 50fps（ISP YUV 带宽瓶颈），属于正常现象
 
 ### 视频防抖 (EIS)
@@ -336,8 +332,7 @@ CameraViewModel.monitorBattery()
 **能力检测**：启动/切换镜头时自动查询 `CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES`，不支持 ON 模式的设备 UI 开关置灰。
 
 **双路径实现**：
-- CameraX 路径：通过 `Camera2Interop.Extender` 在 Preview 和 ImageAnalysis 的 CaptureRequest 中设置
-- Camera2 Surface 路径：直接在 `CaptureRequest.Builder` 中设置，热管理降频时通过 `rebuildSurfaceCaptureRequest()` 保留设置
+- Camera2 路径：直接在 `CaptureRequest.Builder` 中设置，热管理降频时通过 `rebuildCaptureRequest()` 保留设置
 
 **录制保护**：录制中切换防抖会导致视频中途画面跳动，ViewModel 层通过 `appState.isRecording` 检查自动拒绝。
 
