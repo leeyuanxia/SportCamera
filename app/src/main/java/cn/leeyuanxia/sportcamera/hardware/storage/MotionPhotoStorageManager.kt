@@ -18,7 +18,7 @@ import java.util.Locale
  * https://developer.android.google.cn/media/platform/motion-photo-format
  *
  * - 文件格式：JPEG 图像 + 末尾追加 MP4 视频
- * - XMP 元数据使用 GCamera 命名空间 + Container:Directory 描述布局
+ * - XMP 元数据使用 Camera 命名空间（官方规范默认前缀）+ GCamera 别名（Pixel 习惯）
  * - 同时写入 MotionPhoto (新标准) 和 MicroVideo (旧标准) 字段，兼容各厂商
  * - 通过 MediaStore.Images 保存为 image/jpeg
  *
@@ -148,18 +148,19 @@ class MotionPhotoStorageManager(private val context: Context) {
      * 同时写入新旧两套 XMP 字段以确保跨厂商兼容：
      *
      * 新标准 (MotionPhoto) — Google Pixel / 三星 / OPPO / HyperOS 3+：
-     *   GCamera:MotionPhoto, GCamera:MotionPhotoVersion,
-     *   GCamera:MotionPhotoPresentationTimestampUs
+     *   Camera:MotionPhoto, Camera:MotionPhotoVersion,
+     *   Camera:MotionPhotoPresentationTimestampUs
      *   + Container:Directory 容器结构
      *
      * 旧标准 (MicroVideo) — 小米 (旧版 HyperOS) / 魅族 / 早期 Pixel：
-     *   GCamera:MicroVideo, GCamera:MicroVideoVersion,
-     *   GCamera:MicroVideoOffset (=mp4Size), GCamera:MicroVideoPresentationTimestampUs
+     *   Camera:MicroVideo, Camera:MicroVideoVersion,
+     *   Camera:MicroVideoOffset (=mp4Size), Camera:MicroVideoPresentationTimestampUs
      *
      * MicroVideoOffset 含义：从文件末尾向前计算的偏移量，即视频数据的字节大小。
      * 由于视频直接附加在 JPEG 末尾，MicroVideoOffset = MP4 文件大小。
      *
-     * 命名空间前缀使用 GCamera（Google Pixel 实际输出）而非规范默认的 Camera。
+     * 命名空间前缀使用 Camera（Android 官方规范默认前缀）。
+     * 同时声明 GCamera 别名（Google Pixel 习惯前缀），确保兼容两种前缀匹配的解析器。
      */
     private fun buildXmpString(mp4Size: Int): String {
         return buildString {
@@ -168,19 +169,21 @@ class MotionPhotoStorageManager(private val context: Context) {
             append(" <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n")
 
             // rdf:Description 同时包含新旧两套属性
+            // 同时声明 Camera (规范默认) 和 GCamera (Pixel 习惯) 两个前缀映射到同一命名空间
             append("  <rdf:Description rdf:about=\"\"\n")
+            append("    xmlns:Camera=\"${NS_CAMERA}\"\n")
             append("    xmlns:GCamera=\"${NS_CAMERA}\"\n")
             append("    xmlns:Container=\"${NS_CONTAINER}\"\n")
             append("    xmlns:Item=\"${NS_ITEM}\"\n")
             // --- 新标准 MotionPhoto 字段 ---
-            append("    GCamera:MotionPhoto=\"1\"\n")
-            append("    GCamera:MotionPhotoVersion=\"1\"\n")
-            append("    GCamera:MotionPhotoPresentationTimestampUs=\"-1\"\n")
+            append("    Camera:MotionPhoto=\"1\"\n")
+            append("    Camera:MotionPhotoVersion=\"1\"\n")
+            append("    Camera:MotionPhotoPresentationTimestampUs=\"-1\"\n")
             // --- 旧标准 MicroVideo 字段（小米/魅族等国产相册依赖）---
-            append("    GCamera:MicroVideo=\"1\"\n")
-            append("    GCamera:MicroVideoVersion=\"1\"\n")
-            append("    GCamera:MicroVideoOffset=\"${mp4Size}\"\n")
-            append("    GCamera:MicroVideoPresentationTimestampUs=\"0\">\n")
+            append("    Camera:MicroVideo=\"1\"\n")
+            append("    Camera:MicroVideoVersion=\"1\"\n")
+            append("    Camera:MicroVideoOffset=\"${mp4Size}\"\n")
+            append("    Camera:MicroVideoPresentationTimestampUs=\"0\">\n")
 
             // Container:Directory（新版规范，供支持的应用精确定位视频）
             append("   <Container:Directory>\n")
