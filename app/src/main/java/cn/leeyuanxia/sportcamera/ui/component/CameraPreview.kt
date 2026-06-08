@@ -16,6 +16,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import android.view.TextureView
 import cn.leeyuanxia.sportcamera.domain.model.RecordOrientation
 import cn.leeyuanxia.sportcamera.util.DebugLog
+import kotlinx.coroutines.CancellationException
 
 /**
  * TextureView 相机预览的 Compose 封装
@@ -73,6 +74,8 @@ fun CameraPreview(
             onBindCamera(tv, orientation)
             lastBoundOrientation = orientation
             lastBoundTv = tv
+        } catch (e: CancellationException) {
+            throw e  // 协程取消是正常行为，必须重抛
         } catch (e: Exception) {
             DebugLog.e("CameraPreview", "绑定摄像头失败: ${e.message}", e)
         }
