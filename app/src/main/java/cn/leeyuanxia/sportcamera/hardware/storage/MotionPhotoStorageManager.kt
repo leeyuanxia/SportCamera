@@ -78,22 +78,36 @@ class MotionPhotoStorageManager(private val context: Context) {
         // 规范要求：^([^\s/\\]*MP)\.(JPG|jpg|...)
         val fileName = "${FILE_PREFIX}${DATE_FORMAT.format(Date())}.MP.jpg"
 
-        // 1. 通过 MediaStore Images 创建文件条目
+        // 1. 通过 MediaStore Files 创建文件条目（而非 Images）
+        //    部分厂商 ROM（如魅族 Flyme）的 MediaStore 在 Images 表中会对 JPEG 文件后处理，
+        //    可能因识别到 JPEG 末尾有"异常"数据而截断附加的 MP4 视频数据。
+        //    使用 Files 表（通用文件表）可绕过图片专用后处理，保持文件完整性。
+        val isMediaStoreFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        val contentUri = if (isMediaStoreFiles) {
+            MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        } else {
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        }
+
         val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            put(MediaStore.Images.Media.DATE_TAKEN, System.currentTimeMillis())
-            put(MediaStore.Images.Media.WIDTH, width)
-            put(MediaStore.Images.Media.HEIGHT, height)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_DCIM}/$DIR_NAME")
-                put(MediaStore.Images.Media.IS_PENDING, 1)
+            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            put(MediaStore.MediaColumns.DATE_TAKEN, System.currentTimeMillis())
+            if (isMediaStoreFiles) {
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DCIM}/$DIR_NAME")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            } else {
+                put(MediaStore.Images.Media.WIDTH, width)
+                put(MediaStore.Images.Media.HEIGHT, height)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_DCIM}/$DIR_NAME")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
             }
         }
 
-        val uri = context.contentResolver.insert(
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values
-        ) ?: throw IllegalStateException("无法通过 MediaStore 创建动态照片文件")
+        val uri = context.contentResolver.insert(contentUri, values)
+            ?: throw IllegalStateException("无法通过 MediaStore 创建动态照片文件")
 
         DebugLog.d(TAG, "动态照片 MediaStore 条目已创建: $fileName, uri=$uri")
 
@@ -132,6 +146,21 @@ class MotionPhotoStorageManager(private val context: Context) {
                 }
             }
             context.contentResolver.notifyChange(uri, null)
+
+            // 6. 诊断：回读文件验证 MediaStore 是否截断了 MP4 数据
+            //    部分厂商 ROM（如魅族 Flyme）可能在 MediaStore 后处理中截断"异常"的 JPEG 文件
+            try {
+                val pfdRead = context.contentResolver.openFileDescriptor(uri, "r")
+                val actualSize = pfdRead?.statSize ?: -1
+                pfdRead?.close()
+                if (actualSize > 0 && actualSize < totalSize - 1024) {
+                    DebugLog.e(TAG, "文件被截断！写入=${totalSize}B, 实际=${actualSize}B, 差异=${totalSize - actualSize}B — MediaStore 可能丢弃了 MP4 数据")
+                } else {
+                    DebugLog.d(TAG, "文件完整性验证通过: 写入=${totalSize}B, 实际=${actualSize}B")
+                }
+            } catch (e: Exception) {
+                DebugLog.w(TAG, "文件完整性验证失败: ${e.message}")
+            }
 
             DebugLog.d(TAG, "动态照片已保存到相册: $uri")
             return uri.toString()
