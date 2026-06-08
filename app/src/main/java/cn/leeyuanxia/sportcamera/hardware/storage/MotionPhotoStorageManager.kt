@@ -98,13 +98,14 @@ class MotionPhotoStorageManager(private val context: Context) {
         DebugLog.d(TAG, "动态照片 MediaStore 条目已创建: $fileName, uri=$uri")
 
         try {
-            // 2. 构建 XMP APP1 段并注入 JPEG
-            val xmpXml = buildXmpString(mp4Bytes.size)
+            // 2. 两轮 XMP 构建：第一轮确定精确的 JPEG+XMP 大小，第二轮用正确值填充 Primary Item:Length
+            //    部分厂商（如魅族）的解析器无法正确处理 Item:Length=0 的主图项，
+            //    导致无法定位视频数据位置，识别成功但播放失败。
+            val primaryItemLength = computeJpegWithXmpSize(jpegBytes, mp4Bytes.size)
+            val xmpXml = buildXmpString(mp4Bytes.size, primaryItemLength)
             val app1Segment = buildXmpApp1Segment(xmpXml)
 
             // 3. 组装最终 JPEG：在现有 APPn 标记之后注入 XMP APP1
-            //    不直接放在 SOI 后面，而是跳过 JFIF APP0 / EXIF APP1 等已有标记，
-            //    确保 JPEG 结构符合常规约定，避免部分厂商（如魅族）的解析器异常。
             val jpegWithXmp = injectXmpIntoJpeg(jpegBytes, app1Segment)
 
             // 4. 写入文件：JPEG(XMP) + MP4
@@ -162,17 +163,36 @@ class MotionPhotoStorageManager(private val context: Context) {
      * 命名空间前缀使用 Camera（Android 官方规范默认前缀）。
      * 同时声明 GCamera 别名（Google Pixel 习惯前缀），确保兼容两种前缀匹配的解析器。
      */
-    private fun buildXmpString(mp4Size: Int): String {
+    /**
+     * 两轮构建：先计算 JPEG+XMP 的精确大小，再构建包含正确 Primary Item:Length 的 XMP
+     */
+    private fun computeJpegWithXmpSize(jpegBytes: ByteArray, mp4Size: Int): Int {
+        // 第一轮：构建 XMP（Primary Item:Length 填 0 作为占位）
+        val draftXmp = buildXmpStringInternal(mp4Size, primaryItemLength = 0)
+        val draftSegment = buildXmpApp1Segment(draftXmp)
+        return jpegBytes.size + draftSegment.size
+    }
+
+    private fun buildXmpString(mp4Size: Int, primaryItemLength: Int): String {
+        return buildXmpStringInternal(mp4Size, primaryItemLength)
+    }
+
+    /**
+     * 构建 XMP XML 字符串（内部方法）
+     *
+     * @param mp4Size MP4 视频数据的字节大小
+     * @param primaryItemLength 主图（JPEG+XMP）的精确字节大小，0 表示由解析器自行计算
+     */
+    private fun buildXmpStringInternal(mp4Size: Int, primaryItemLength: Int): String {
         return buildString {
             append("<?xpacket begin=\"﻿\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n")
             append("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n")
             append(" <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n")
 
-            // rdf:Description 同时包含新旧两套属性
-            // 同时声明 Camera (规范默认) 和 GCamera (Pixel 习惯) 两个前缀映射到同一命名空间
+            // 只使用 Camera 前缀（Android 官方规范默认前缀）
+            // 不声明 GCamera 别名，避免部分 XMP 解析器对同一命名空间多前缀的混淆
             append("  <rdf:Description rdf:about=\"\"\n")
             append("    xmlns:Camera=\"${NS_CAMERA}\"\n")
-            append("    xmlns:GCamera=\"${NS_CAMERA}\"\n")
             append("    xmlns:Container=\"${NS_CONTAINER}\"\n")
             append("    xmlns:Item=\"${NS_ITEM}\"\n")
             // --- 新标准 MotionPhoto 字段 ---
@@ -189,11 +209,12 @@ class MotionPhotoStorageManager(private val context: Context) {
             append("   <Container:Directory>\n")
             append("    <rdf:Seq>\n")
 
-            // Item 1: 主图片（JPEG）
+            // Item 1: 主图片（JPEG + XMP）
+            // 设置精确的 Item:Length，修复部分解析器无法处理 Length=0 的问题
             append("     <rdf:li rdf:parseType=\"Resource\">\n")
             append("      <Item:Mime>image/jpeg</Item:Mime>\n")
             append("      <Item:Semantic>Primary</Item:Semantic>\n")
-            append("      <Item:Length>0</Item:Length>\n")
+            append("      <Item:Length>${primaryItemLength}</Item:Length>\n")
             append("      <Item:Padding>0</Item:Padding>\n")
             append("     </rdf:li>\n")
 
