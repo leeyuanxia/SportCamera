@@ -94,7 +94,7 @@ class MotionPhotoStorageManager(private val context: Context) {
             put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
             put(MediaStore.MediaColumns.DATE_TAKEN, System.currentTimeMillis())
             if (isMediaStoreFiles) {
-                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/$DIR_NAME")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DCIM}/$DIR_NAME")
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             } else {
                 put(MediaStore.Images.Media.WIDTH, width)
