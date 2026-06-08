@@ -396,6 +396,7 @@ class VoiceTriggerRecorder(
 
                 // 步骤 1: 从环形缓冲 dump 最近 2 秒帧（不停止编码器，快照操作）
                 val allFrames = preRecordManager.dumpRecentFrames(2000L)
+                val allAudioFrames = preAudioRecorder?.dumpRecentFrames(2000L) ?: emptyList()
 
                 if (allFrames.isEmpty()) {
                     DebugLog.e(TAG, "动态照片: 帧数据为空")
@@ -405,7 +406,8 @@ class VoiceTriggerRecorder(
                     return@launch
                 }
 
-                DebugLog.d(TAG, "动态照片: dump ${allFrames.size} 帧")
+                val audioCsd = preAudioRecorder?.csdData
+                DebugLog.d(TAG, "动态照片: dump ${allFrames.size} 视频帧, ${allAudioFrames.size} 音频帧")
                 _appState.value = AppState.CapturingPhoto(0.2f)
 
                 // 步骤 2: 获取编码参数
@@ -419,7 +421,7 @@ class VoiceTriggerRecorder(
                     RecordOrientation.LANDSCAPE -> 0
                 }
 
-                // 步骤 3: 合成动态照片
+                // 步骤 3: 合成动态照片（含音频）
                 val assembler = MotionPhotoAssembler(context, motionPhotoStorageManager)
                 val result = assembler.assemble(
                     frames = allFrames,
@@ -428,6 +430,8 @@ class VoiceTriggerRecorder(
                     csd0Data = csd0,
                     csd1Data = csd1,
                     rotation = rotation,
+                    audioFrames = allAudioFrames,
+                    audioCsdData = audioCsd,
                     onProgress = { progress ->
                         _appState.value = AppState.CapturingPhoto(0.2f + progress * 0.8f)
                     },

@@ -18,7 +18,8 @@ import java.util.Locale
  * https://developer.android.google.cn/media/platform/motion-photo-format
  *
  * - 文件格式：JPEG 图像 + 末尾追加 MP4 视频
- * - XMP 元数据使用 Camera 命名空间 + Container:Directory 描述布局
+ * - XMP 元数据使用 GCamera 命名空间 + Container:Directory 描述布局
+ * - 同时写入 MotionPhoto (新标准) 和 MicroVideo (旧标准) 字段，兼容各厂商
  * - 通过 MediaStore.Images 保存为 image/jpeg
  *
  * 文件结构：
@@ -41,6 +42,21 @@ class MotionPhotoStorageManager(private val context: Context) {
         private const val NS_CAMERA = "http://ns.google.com/photos/1.0/camera/"
         private const val NS_CONTAINER = "http://ns.google.com/photos/1.0/container/"
         private const val NS_ITEM = "http://ns.google.com/photos/1.0/container/item/"
+
+        /**
+         * 厂商兼容策略说明：
+         *
+         * Android 动态照片存在新旧两套 XMP 标准，共用同一命名空间：
+         * - 新标准 MotionPhoto (Google Pixel/三星/OPPO): MotionPhoto + Container:Directory
+         * - 旧标准 MicroVideo  (小米 HyperOS 旧版/魅族/早期 Pixel): MicroVideo + MicroVideoOffset
+         *
+         * 为兼容所有厂商，XMP 中同时写入两套字段：
+         * - 新标准字段供 Google 相册、三星、OPPO 等识别
+         * - 旧标准字段供小米、魅族等国产手机系统相册识别和播放
+         *
+         * 命名空间前缀使用 "GCamera" 而非规范默认的 "Camera"，
+         * 这是 Google Pixel 实际输出的前缀，各厂商解析器均以此为参照。
+         */
     }
 
     /**
@@ -86,14 +102,10 @@ class MotionPhotoStorageManager(private val context: Context) {
             val xmpXml = buildXmpString(mp4Bytes.size)
             val app1Segment = buildXmpApp1Segment(xmpXml)
 
-            // 3. 组装最终 JPEG：SOI(2B) + APP1(XMP) + 原始 JPEG 剩余数据
-            val jpegWithXmp = ByteArray(jpegBytes.size + app1Segment.size)
-            // SOI 标记（FF D8），占 2 字节
-            System.arraycopy(jpegBytes, 0, jpegWithXmp, 0, 2)
-            // APP1 XMP 段
-            System.arraycopy(app1Segment, 0, jpegWithXmp, 2, app1Segment.size)
-            // 原始 JPEG 剩余数据（跳过 SOI 的 2 字节）
-            System.arraycopy(jpegBytes, 2, jpegWithXmp, 2 + app1Segment.size, jpegBytes.size - 2)
+            // 3. 组装最终 JPEG：在现有 APPn 标记之后注入 XMP APP1
+            //    不直接放在 SOI 后面，而是跳过 JFIF APP0 / EXIF APP1 等已有标记，
+            //    确保 JPEG 结构符合常规约定，避免部分厂商（如魅族）的解析器异常。
+            val jpegWithXmp = injectXmpIntoJpeg(jpegBytes, app1Segment)
 
             // 4. 写入文件：JPEG(XMP) + MP4
             val pfd = context.contentResolver.openFileDescriptor(uri, "w")
@@ -133,11 +145,21 @@ class MotionPhotoStorageManager(private val context: Context) {
     /**
      * 构建 Motion Photo XMP 元数据
      *
-     * 同时包含新版和旧版属性，确保最大兼容性：
-     * - 新版 Container:Directory（Android Motion Photo format 1.0）
-     * - 旧版 MicroVideoOffset（小米、多数国产相册依赖此属性）
+     * 同时写入新旧两套 XMP 字段以确保跨厂商兼容：
      *
-     * 命名空间前缀用 GCamera（Google Pixel 实际输出的前缀）
+     * 新标准 (MotionPhoto) — Google Pixel / 三星 / OPPO / HyperOS 3+：
+     *   GCamera:MotionPhoto, GCamera:MotionPhotoVersion,
+     *   GCamera:MotionPhotoPresentationTimestampUs
+     *   + Container:Directory 容器结构
+     *
+     * 旧标准 (MicroVideo) — 小米 (旧版 HyperOS) / 魅族 / 早期 Pixel：
+     *   GCamera:MicroVideo, GCamera:MicroVideoVersion,
+     *   GCamera:MicroVideoOffset (=mp4Size), GCamera:MicroVideoPresentationTimestampUs
+     *
+     * MicroVideoOffset 含义：从文件末尾向前计算的偏移量，即视频数据的字节大小。
+     * 由于视频直接附加在 JPEG 末尾，MicroVideoOffset = MP4 文件大小。
+     *
+     * 命名空间前缀使用 GCamera（Google Pixel 实际输出）而非规范默认的 Camera。
      */
     private fun buildXmpString(mp4Size: Int): String {
         return buildString {
@@ -145,19 +167,26 @@ class MotionPhotoStorageManager(private val context: Context) {
             append("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n")
             append(" <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n")
 
+            // rdf:Description 同时包含新旧两套属性
             append("  <rdf:Description rdf:about=\"\"\n")
-            append("    xmlns:Camera=\"${NS_CAMERA}\"\n")
+            append("    xmlns:GCamera=\"${NS_CAMERA}\"\n")
             append("    xmlns:Container=\"${NS_CONTAINER}\"\n")
             append("    xmlns:Item=\"${NS_ITEM}\"\n")
-            append("    Camera:MotionPhoto=\"1\"\n")
-            append("    Camera:MotionPhotoVersion=\"1\"\n")
-            append("    Camera:MotionPhotoPresentationTimestampUs=\"-1\">\n")
+            // --- 新标准 MotionPhoto 字段 ---
+            append("    GCamera:MotionPhoto=\"1\"\n")
+            append("    GCamera:MotionPhotoVersion=\"1\"\n")
+            append("    GCamera:MotionPhotoPresentationTimestampUs=\"-1\"\n")
+            // --- 旧标准 MicroVideo 字段（小米/魅族等国产相册依赖）---
+            append("    GCamera:MicroVideo=\"1\"\n")
+            append("    GCamera:MicroVideoVersion=\"1\"\n")
+            append("    GCamera:MicroVideoOffset=\"${mp4Size}\"\n")
+            append("    GCamera:MicroVideoPresentationTimestampUs=\"0\">\n")
 
-            // Container:Directory（新版规范）
+            // Container:Directory（新版规范，供支持的应用精确定位视频）
             append("   <Container:Directory>\n")
             append("    <rdf:Seq>\n")
 
-            // Item 1: 主图片
+            // Item 1: 主图片（JPEG）
             append("     <rdf:li rdf:parseType=\"Resource\">\n")
             append("      <Item:Mime>image/jpeg</Item:Mime>\n")
             append("      <Item:Semantic>Primary</Item:Semantic>\n")
@@ -181,6 +210,49 @@ class MotionPhotoStorageManager(private val context: Context) {
             append("</x:xmpmeta>\n")
             append("<?xpacket end=\"w\"?>")
         }
+    }
+
+    /**
+     * 将 XMP APP1 段注入 JPEG，放置在已有 APPn 标记之后
+     *
+     * JPEG 标准约定：APP0 (JFIF) 和 APP1 (EXIF) 等标记应在 SOI 之后，
+     * 其他标记之前。XMP 数据也以 APP1 形式存在，应放在这些标记之后。
+     *
+     * 部分厂商（魅族等）的 JPEG 解析器对标记顺序敏感，
+     * 将 XMP 放在 JFIF 之前可能导致解析异常，影响封面图显示和动态照片播放。
+     *
+     * @param jpegBytes 原始 JPEG 字节（来自 Bitmap.compress）
+     * @param app1Segment XMP APP1 段（包含 FF E1 标记头）
+     * @return 注入 XMP 后的新 JPEG 字节数组
+     */
+    private fun injectXmpIntoJpeg(jpegBytes: ByteArray, app1Segment: ByteArray): ByteArray {
+        // 解析 JPEG 标记，跳过 SOI (2B) 和所有 APPn 标记
+        var pos = 2 // 跳过 SOI (FF D8)
+        while (pos < jpegBytes.size - 1) {
+            val b0 = jpegBytes[pos].toInt() and 0xFF
+            val b1 = jpegBytes[pos + 1].toInt() and 0xFF
+
+            // 检查是否为 APPn 标记 (0xFF 0xE0 ~ 0xFF 0xEF)
+            if (b0 == 0xFF && b1 in 0xE0..0xEF) {
+                // APPn 标记：读取长度字段（大端序，包含长度字段自身的 2 字节）
+                if (pos + 3 >= jpegBytes.size) break
+                val segLen = ((jpegBytes[pos + 2].toInt() and 0xFF) shl 8) or
+                             (jpegBytes[pos + 3].toInt() and 0xFF)
+                pos += 2 + segLen // 跳过 FF En + 长度 + 数据
+            } else {
+                // 非 APPn 标记 → 在当前位置注入 XMP APP1
+                break
+            }
+        }
+
+        // 组装：SOI + [已有APPn标记] + [XMP APP1] + [剩余数据]
+        val result = ByteArray(jpegBytes.size + app1Segment.size)
+        System.arraycopy(jpegBytes, 0, result, 0, pos)          // SOI + 已有APPn
+        System.arraycopy(app1Segment, 0, result, pos, app1Segment.size) // XMP APP1
+        System.arraycopy(jpegBytes, pos, result, pos + app1Segment.size, jpegBytes.size - pos) // 剩余数据
+
+        DebugLog.d(TAG, "JPEG XMP 注入: 注入位置=$pos, APPn段=${app1Segment.size}B, 总大小=${result.size}B")
+        return result
     }
 
     /**

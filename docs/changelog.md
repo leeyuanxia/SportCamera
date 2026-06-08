@@ -4,7 +4,63 @@
 
 ---
 
-## 2026-06-08
+## 2026-06-08 (第二批)
+
+### 动态照片添加音轨 + 魅族兼容性修复 + 封面画质提升
+
+**问题**：
+- 小米手机：动态照片已能识别，但播放时没有声音
+- 魅族手机：仍然无法播放（XMP 双标准字段已添加但仍失败）
+- 封面图：从低码率视频帧提取的 JPEG 画质模糊
+
+**修改文件**：
+- `domain/MotionPhotoAssembler.kt` — 新增音频轨合成 + 改进封面提取策略
+- `hardware/storage/MotionPhotoStorageManager.kt` — 修复 XMP APP1 注入位置
+- `domain/VoiceTriggerRecorder.kt` — 动态照片触发时同时 dump 音频帧
+
+**修改详情**：
+
+1. **音轨支持**（MotionPhotoAssembler）：
+   - `assemble()` 新增 `audioFrames`、`audioCsdData` 参数
+   - `writeFramesToMp4()` 添加 AAC 音频轨（44.1kHz mono 128kbps）
+   - 音频帧 PTS 归一化从 0 开始，与视频轨对齐
+   - `VoiceTriggerRecorder.onMotionPhotoDetected()` 同步 dump 音频环形缓冲最近的 2 秒 AAC 帧，传入合成器
+
+2. **JPEG XMP 注入位置修复**（MotionPhotoStorageManager）：
+   - 新增 `injectXmpIntoJpeg()` 方法，解析 JPEG 标记结构
+   - XMP APP1 段现在放置在所有已有 APPn 标记（JFIF/EXIF）之后
+   - 不再直接放在 SOI 后面，修复部分厂商 JPEG 解析器兼容性问题
+
+3. **封面提取优化**（MotionPhotoAssembler）：
+   - JPEG 质量从 95 提升到 98
+   - 提取策略改为多时间点回退（1/3 → 1/2 → 0），优先选中间关键帧
+   - 增强帧提取失败时的日志和兜底处理
+
+---
+
+## 2026-06-08 (第一批)
+
+### 修复动态照片跨厂商兼容性（小米无法识别、魅族无法播放）
+
+**问题**：
+- 小米手机：系统相册无法识别动态照片（抖音等第三方 App 可识别）
+- 魅族手机：系统相册能识别但无法播放
+
+**根因**：Android 动态照片存在新旧两套 XMP 标准，共用同一命名空间：
+- 新标准 MotionPhoto（Google Pixel/三星/OPPO）：`MotionPhoto` + `Container:Directory`
+- 旧标准 MicroVideo（小米旧版 HyperOS/魅族/早期 Pixel）：`MicroVideo` + `MicroVideoOffset`
+
+原实现只写入了新标准的 XMP 字段。小米系统相册依赖旧标准的 `MicroVideo` 字段进行识别，缺少则完全不识别。魅族系统相册通过新标准检测到了标签，但因缺少 `MicroVideoOffset` 无法定位视频数据位置，导致播放失败。抖音等 App 不依赖 XMP，直接搜索 MP4 文件头（`ftyp`），故不受影响。
+
+**修改文件**：
+- `hardware/storage/MotionPhotoStorageManager.kt` — XMP 元数据同时写入新旧两套字段；命名空间前缀从 `Camera` 改为 `GCamera`（与 Google Pixel 实际输出一致）
+
+**修改详情**：
+1. `buildXmpString()` 同时写入 MotionPhoto 和 MicroVideo 两套 XMP 属性
+2. 新增 `GCamera:MicroVideo="1"`、`GCamera:MicroVideoVersion="1"`、`GCamera:MicroVideoOffset`（=MP4 大小）、`GCamera:MicroVideoPresentationTimestampUs="0"`
+3. 命名空间前缀 `xmlns:Camera` → `xmlns:GCamera`，对齐 Google Pixel 实际输出
+
+---
 
 ### 新增动态照片（Motion Photo）功能
 
