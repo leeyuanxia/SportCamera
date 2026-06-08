@@ -13,6 +13,7 @@ import cn.leeyuanxia.sportcamera.hardware.audio.RingBufferAudioRecorder
 import cn.leeyuanxia.sportcamera.hardware.camera.CameraController
 import cn.leeyuanxia.sportcamera.hardware.camera.CameraFramePipeline
 import cn.leeyuanxia.sportcamera.hardware.camera.RingBufferRecorder.Companion.isConfigFrame
+import cn.leeyuanxia.sportcamera.hardware.storage.MotionPhotoStorageManager
 import cn.leeyuanxia.sportcamera.hardware.storage.VideoStorageManager
 import cn.leeyuanxia.sportcamera.power.PowerStateManager
 import cn.leeyuanxia.sportcamera.power.ThermalThrottler
@@ -46,6 +47,7 @@ class VoiceTriggerRecorder(
     private val kwsManager: KwsManager,
     private val preRecordManager: PreRecordManager,
     private val storageManager: VideoStorageManager,
+    private val motionPhotoStorageManager: MotionPhotoStorageManager,
     private val scope: CoroutineScope,
     private val framePipeline: CameraFramePipeline,
     private val powerStateManager: PowerStateManager,
@@ -70,6 +72,7 @@ class VoiceTriggerRecorder(
 
     private var kwsJob: Job? = null
     private var recordJob: Job? = null
+    private var motionPhotoJob: Job? = null
     private var preRecordDrainJob: Job? = null
     private var throttleJob: Job? = null
 
@@ -236,8 +239,9 @@ class VoiceTriggerRecorder(
 
             // 步骤 3: 订阅唤醒词事件
             kwsManager.keywordFlow.collect { keyword ->
-                if (kwsManager.matchStartRecording(keyword)) {
-                    onWakeWordDetected()
+                when {
+                    kwsManager.matchStartRecording(keyword) -> onWakeWordDetected()
+                    kwsManager.matchMotionPhoto(keyword) -> onMotionPhotoDetected()
                 }
             }
         }
@@ -277,6 +281,7 @@ class VoiceTriggerRecorder(
         kwsManager.stopListening()
         kwsManager.setExternalPcmMode(false)  // 唤醒后 KWS 不再需要 PCM 数据
         throttleJob?.cancel()
+        motionPhotoJob?.cancel()  // 录像优先：取消正在进行的动态照片任务
 
         val totalDurationMs = currentDuration.totalMs
         val postHalfMs = currentDuration.postHalfMs
@@ -368,6 +373,83 @@ class VoiceTriggerRecorder(
     }
 
     /**
+     * 动态照片唤醒词检测 → 拍摄动态照片
+     *
+     * 核心设计：不中断 Standby！KWS 和预录编码器继续运行。
+     * 从环形缓冲 dump 最近 2 秒的帧快照，合成动态照片后直接回到 Standby。
+     *
+     * 与录像的互斥：
+     * - 录像中触发动态照片 → 忽略
+     * - 动态照片进行中触发录像 → 取消动态照片任务
+     */
+    private fun onMotionPhotoDetected() {
+        // 互斥检查：录像或动态照片进行中时忽略
+        val currentState = _appState.value
+        if (currentState is AppState.Recording || currentState is AppState.CapturingPhoto) {
+            DebugLog.d(TAG, "动态照片触发忽略: 当前状态=${currentState.label}")
+            return
+        }
+
+        motionPhotoJob = scope.launch {
+            try {
+                _appState.value = AppState.CapturingPhoto(0f)
+
+                // 步骤 1: 从环形缓冲 dump 最近 2 秒帧（不停止编码器，快照操作）
+                val allFrames = preRecordManager.dumpRecentFrames(2000L)
+
+                if (allFrames.isEmpty()) {
+                    DebugLog.e(TAG, "动态照片: 帧数据为空")
+                    _appState.value = AppState.Error("动态照片数据为空")
+                    delay(1000)
+                    _appState.value = AppState.Standby
+                    return@launch
+                }
+
+                DebugLog.d(TAG, "动态照片: dump ${allFrames.size} 帧")
+                _appState.value = AppState.CapturingPhoto(0.2f)
+
+                // 步骤 2: 获取编码参数
+                val encW = preRecordManager.cameraWidth.takeIf { it > 0 } ?: currentProfile.width
+                val encH = preRecordManager.cameraHeight.takeIf { it > 0 } ?: currentProfile.height
+                val csd0 = preRecordManager.getCsdData()
+                val csd1 = preRecordManager.getCsd1Data()
+
+                val rotation = when (currentOrientation) {
+                    RecordOrientation.PORTRAIT -> 90
+                    RecordOrientation.LANDSCAPE -> 0
+                }
+
+                // 步骤 3: 合成动态照片
+                val assembler = MotionPhotoAssembler(context, motionPhotoStorageManager)
+                val result = assembler.assemble(
+                    frames = allFrames,
+                    width = encW,
+                    height = encH,
+                    csd0Data = csd0,
+                    csd1Data = csd1,
+                    rotation = rotation,
+                    onProgress = { progress ->
+                        _appState.value = AppState.CapturingPhoto(0.2f + progress * 0.8f)
+                    },
+                )
+
+                DebugLog.d(TAG, "动态照片已保存: $result")
+
+                // 步骤 4: 直接回到 Standby（KWS/编码器未中断，无需 restart）
+                _appState.value = AppState.Standby
+
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                DebugLog.e(TAG, "动态照片失败", e)
+                _appState.value = AppState.Error(e.message ?: "动态照片失败")
+                delay(1000)
+                _appState.value = AppState.Standby
+            }
+        }
+    }
+
+    /**
      * 录像完成后回到待机状态
      *
      * 先停止所有资源再调用 enterStandby() 重建一切。
@@ -391,6 +473,7 @@ class VoiceTriggerRecorder(
     private fun stopInternal(stopCamera: Boolean) {
         kwsJob?.cancel()
         recordJob?.cancel()
+        motionPhotoJob?.cancel()
         preRecordDrainJob?.cancel()
         throttleJob?.cancel()
         // 清理音频预录

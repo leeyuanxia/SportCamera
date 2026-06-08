@@ -33,6 +33,7 @@ import cn.leeyuanxia.sportcamera.domain.AppState
 import cn.leeyuanxia.sportcamera.domain.label
 import cn.leeyuanxia.sportcamera.domain.model.CameraLens
 import cn.leeyuanxia.sportcamera.domain.model.PreRecordDuration
+import cn.leeyuanxia.sportcamera.ui.theme.AccentAmber
 import cn.leeyuanxia.sportcamera.ui.theme.ChipSelected
 import cn.leeyuanxia.sportcamera.ui.theme.ChipSelectedText
 import cn.leeyuanxia.sportcamera.ui.theme.ChipUnselected
@@ -195,12 +196,13 @@ private fun StatusDot(appState: AppState) {
         AppState.Idle -> StatusIdle
         AppState.Standby -> StatusStandby
         is AppState.Recording -> StatusRecording
+        is AppState.CapturingPhoto -> AccentAmber
         is AppState.Saving -> StatusSaving
         is AppState.Error -> StatusRecording
     }
 
-    // 录制和待机时呼吸动画
-    val shouldAnimate = appState is AppState.Recording || appState is AppState.Standby
+    // 录制、待机和动态照片时呼吸动画
+    val shouldAnimate = appState is AppState.Recording || appState is AppState.Standby || appState is AppState.CapturingPhoto
     val infiniteTransition = rememberInfiniteTransition(label = "statusDot")
     val animAlpha by infiniteTransition.animateFloat(
         initialValue = 1.0f,

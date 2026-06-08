@@ -274,4 +274,11 @@ class KwsManager(private val assetManager: AssetManager) {
     fun matchStartRecording(keyword: String): Boolean {
         return keyword.contains("录") || keyword.contains("录像") || keyword == "开始录像"
     }
+
+    /**
+     * 匹配唤醒词 — 判断是否为"拍摄动态照片"相关指令
+     */
+    fun matchMotionPhoto(keyword: String): Boolean {
+        return keyword.contains("动态") || keyword.contains("照片") || keyword == "拍摄动态照片"
+    }
 }

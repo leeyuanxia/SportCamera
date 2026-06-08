@@ -24,18 +24,32 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import cn.leeyuanxia.sportcamera.domain.AppState
+import cn.leeyuanxia.sportcamera.ui.theme.AccentAmber
 import cn.leeyuanxia.sportcamera.ui.theme.StatusRecording
 
 /**
- * 中央录制指示器 — 红色圆点 + 脉冲光环 + 倒计时
+ * 中央录制指示器 — 录制时显示红色脉冲 + 倒计时，动态照片时显示琥珀色闪烁
  */
 @Composable
 fun RecordIndicator(
     appState: AppState,
     modifier: Modifier = Modifier,
 ) {
-    if (appState !is AppState.Recording) return
+    when (appState) {
+        is AppState.Recording -> RecordIndicatorContent(appState, modifier)
+        is AppState.CapturingPhoto -> MotionPhotoIndicatorContent(appState.progress, modifier)
+        else -> return
+    }
+}
 
+/**
+ * 录制指示器 — 红色圆点 + 脉冲光环 + 倒计时
+ */
+@Composable
+private fun RecordIndicatorContent(
+    appState: AppState.Recording,
+    modifier: Modifier = Modifier,
+) {
     val elapsedSec = appState.elapsedMs / 1000.0
     val targetSec = appState.targetMs / 1000
     val progress = (appState.elapsedMs.toFloat() / appState.targetMs).coerceIn(0f, 1f)
@@ -101,6 +115,88 @@ fun RecordIndicator(
             text = formatTime(elapsedSec, targetSec),
             color = Color.White,
             style = MaterialTheme.typography.displayLarge,
+            fontWeight = FontWeight.Bold,
+        )
+
+        Spacer(Modifier.height(4.dp))
+
+        // 进度文字
+        Text(
+            text = "${(progress * 100).toInt()}%",
+            color = Color.White.copy(alpha = 0.4f),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+    }
+}
+
+/**
+ * 动态照片指示器 — 琥珀色圆环 + 白色闪烁 + "动态照片" 文字
+ */
+@Composable
+private fun MotionPhotoIndicatorContent(
+    progress: Float,
+    modifier: Modifier = Modifier,
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "motionPhotoPulse")
+    val ringScale by infiniteTransition.animateFloat(
+        initialValue = 1.0f,
+        targetValue = 1.6f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(600),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "ringScale",
+    )
+    val ringAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.5f,
+        targetValue = 0.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(600),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "ringAlpha",
+    )
+    val dotAlpha by infiniteTransition.animateFloat(
+        initialValue = 1.0f,
+        targetValue = 0.3f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(400),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "dotAlpha",
+    )
+
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        // 动态照片图标：琥珀色脉冲光环 + 白色闪烁圆点
+        Box(
+            modifier = Modifier.size(56.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            // 外层脉冲光环
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .scale(ringScale)
+                    .border(2.dp, AccentAmber.copy(alpha = ringAlpha), CircleShape),
+            )
+            // 内层圆点（白色闪烁）
+            Box(
+                modifier = Modifier
+                    .size(18.dp)
+                    .background(Color.White.copy(alpha = dotAlpha), CircleShape),
+            )
+        }
+
+        Spacer(Modifier.height(16.dp))
+
+        // "动态照片" 标签
+        Text(
+            text = "动态照片",
+            color = AccentAmber,
+            style = MaterialTheme.typography.headlineMedium,
             fontWeight = FontWeight.Bold,
         )
 

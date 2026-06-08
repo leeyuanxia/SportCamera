@@ -87,18 +87,18 @@ fun MainScreen(viewModel: CameraViewModel) {
     val activity = context as? ComponentActivity
 
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
-    val isActive = appState is AppState.Standby || appState.isRecording
+    val isActive = appState is AppState.Standby || appState.isRecording || appState is AppState.CapturingPhoto
 
     // 屏幕亮度和常亮控制
     DisposableEffect(isActive, appState) {
         val window = activity?.window
         if (isActive) {
-            // 待机和录制时：屏幕常亮
+            // 待机、录制和动态照片拍摄时：屏幕常亮
             window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             // 设置最低亮度（不修改系统设置，只修改当前窗口）
             val params = window?.attributes
-            params?.screenBrightness = if (appState.isRecording) {
-                WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE // 录制时恢复系统默认
+            params?.screenBrightness = if (appState.isRecording || appState is AppState.CapturingPhoto) {
+                WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE // 录制/动态照片时恢复系统默认
             } else {
                 0.01f // 待机时最低亮度
             }

@@ -22,6 +22,9 @@ sealed interface AppState {
     /** 正在合成/保存视频文件 */
     data class Saving(val progress: Float) : AppState
 
+    /** 正在拍摄动态照片 */
+    data class CapturingPhoto(val progress: Float) : AppState
+
     /** 错误状态 */
     data class Error(val message: String) : AppState
 }
@@ -33,6 +36,7 @@ val AppState.label: String
         AppState.Standby -> "监听中"
         is AppState.Recording -> "录制中 ${elapsedMs / 1000}s / ${targetMs / 1000}s"
         is AppState.Saving -> "保存中 ${(progress * 100).toInt()}%"
+        is AppState.CapturingPhoto -> "动态照片 ${(progress * 100).toInt()}%"
         is AppState.Error -> "错误: $message"
     }
 
@@ -40,6 +44,6 @@ val AppState.label: String
 val AppState.isRecording: Boolean
     get() = this is AppState.Recording
 
-/** 活跃状态（Standby 或 Recording）时为 true */
+/** 活跃状态（Standby、Recording 或 CapturingPhoto）时为 true */
 val AppState.isActive: Boolean
-    get() = this is AppState.Standby || this is AppState.Recording
+    get() = this is AppState.Standby || this is AppState.Recording || this is AppState.CapturingPhoto

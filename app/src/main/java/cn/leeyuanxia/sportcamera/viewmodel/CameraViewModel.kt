@@ -61,6 +61,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         kwsManager = kwsManager,
         preRecordManager = preRecordManager,
         storageManager = storageManager,
+        motionPhotoStorageManager = container.motionPhotoStorageManager,
         scope = viewModelScope,
         framePipeline = framePipeline,
         powerStateManager = container.powerStateManager,
@@ -162,6 +163,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 when (state) {
                     is AppState.Recording -> {
                         // 录制时显示预览
+                        peekJob?.cancel()
+                        _previewVisible.value = true
+                    }
+                    is AppState.CapturingPhoto -> {
+                        // 动态照片拍摄时显示预览
                         peekJob?.cancel()
                         _previewVisible.value = true
                     }
@@ -401,7 +407,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
      */
     suspend fun pausePreview() {
         val currentState = appState.value
-        if (currentState is AppState.Standby || currentState.isRecording) {
+        if (currentState is AppState.Standby || currentState.isRecording || currentState is AppState.CapturingPhoto) {
             DebugLog.d(TAG, "应用进入后台，停止预览")
             voiceTriggerRecorder.stop()
             cameraController.stopCamera2Session()

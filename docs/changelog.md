@@ -4,6 +4,36 @@
 
 ---
 
+## 2026-06-08
+
+### 新增动态照片（Motion Photo）功能
+
+语音唤醒词"拍摄动态照片"自动触发，截取最近 2 秒预录帧，保存为 Android 官方 Motion Photo format 1.0 格式的动态照片文件（JPEG + 追加 MP4 + XMP Container Directory 元数据），Google Photos 和系统相册可识别为动态照片，长按播放。
+
+**新建文件**：
+- `hardware/storage/MotionPhotoStorageManager.kt` — 动态照片存储管理器，MediaStore Images 保存 + JPEG APP1 XMP 元数据注入 + MP4 追加合并
+- `domain/MotionPhotoAssembler.kt` — 动态照片合成器，H.264 帧 → 临时 MP4 → MediaMetadataRetriever 提取中间帧 JPEG + MP4 字节组合
+
+**修改文件**：
+- `domain/AppState.kt` — 新增 `CapturingPhoto(progress)` 状态，更新 label、isActive 扩展属性
+- `hardware/audio/KwsManager.kt` — 新增 `matchMotionPhoto()` 关键词匹配方法
+- `assets/onnx-kws/keywords.txt` — 新增"拍摄动态照片"和"拍动态照片"拼音唤醒词
+- `domain/VoiceTriggerRecorder.kt` — 新增 `motionPhotoStorageManager` 构造参数、`onMotionPhotoDetected()` 方法；修改 keywordFlow 收集器支持多唤醒词分支；录像和动态照片互斥处理
+- `di/AppContainer.kt` — 注册 `MotionPhotoStorageManager` 单例，注入 `VoiceTriggerRecorder`
+- `viewmodel/CameraViewModel.kt` — 新增 `motionPhotoStorageManager` 参数；AppState 监听处理 `CapturingPhoto` 状态
+- `ui/component/RecordIndicator.kt` — 新增琥珀色动态照片指示器（白色闪烁圆点 + "动态照片" 文字）
+- `ui/component/StatusBar.kt` — `CapturingPhoto` 状态使用琥珀色指示灯
+- `ui/screen/MainScreen.kt` — `CapturingPhoto` 时屏幕常亮并恢复默认亮度
+
+**核心设计**：
+- 动态照片拍摄不中断 Standby（KWS/预录编码器/热管理继续运行）
+- 从环形缓冲 dump 2 秒帧快照 → 合成 → 直接回到 Standby
+- 文件格式：JPEG（含 XMP Container:Directory）+ 末尾追加 MP4
+- 文件命名：`MOTION_yyyyMMdd_HHmmss.MP.jpg`
+- 保存路径：`DCIM/SportCamera/`
+
+---
+
 ## 2026-06-06
 
 ### 精简 CLAUDE.md + 横屏 UI 适配
