@@ -131,17 +131,13 @@ class MotionPhotoStorageManager(private val context: Context) {
     }
 
     /**
-     * 构建 Motion Photo format 1.0 的 XMP 元数据
+     * 构建 Motion Photo XMP 元数据
      *
-     * 严格遵循规范：
-     * - Camera:MotionPhoto = 1
-     * - Camera:MotionPhotoVersion = 1
-     * - Camera:MotionPhotoPresentationTimestampUs = -1（未指定）
-     * - Container:Directory 包含两个有序 Item
-     * - Item 1: Primary 图片, Length=0（读者通过解析 JPEG 自行确定长度）
-     * - Item 2: MotionPhoto 视频, Length=MP4 字节数
+     * 同时包含新版和旧版属性，确保最大兼容性：
+     * - 新版 Container:Directory（Android Motion Photo format 1.0）
+     * - 旧版 MicroVideoOffset（小米、多数国产相册依赖此属性）
      *
-     * 注意：不包含已废弃的 MicroVideo 属性（规范要求忽略）
+     * 命名空间前缀用 GCamera（Google Pixel 实际输出的前缀）
      */
     private fun buildXmpString(mp4Size: Int): String {
         return buildString {
@@ -149,7 +145,6 @@ class MotionPhotoStorageManager(private val context: Context) {
             append("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n")
             append(" <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n")
 
-            // Camera 命名空间属性
             append("  <rdf:Description rdf:about=\"\"\n")
             append("    xmlns:Camera=\"${NS_CAMERA}\"\n")
             append("    xmlns:Container=\"${NS_CONTAINER}\"\n")
@@ -158,11 +153,11 @@ class MotionPhotoStorageManager(private val context: Context) {
             append("    Camera:MotionPhotoVersion=\"1\"\n")
             append("    Camera:MotionPhotoPresentationTimestampUs=\"-1\">\n")
 
-            // Container:Directory
+            // Container:Directory（新版规范）
             append("   <Container:Directory>\n")
             append("    <rdf:Seq>\n")
 
-            // Item 1: 主图片（Primary）— Length=0，读者自行解析
+            // Item 1: 主图片
             append("     <rdf:li rdf:parseType=\"Resource\">\n")
             append("      <Item:Mime>image/jpeg</Item:Mime>\n")
             append("      <Item:Semantic>Primary</Item:Semantic>\n")
@@ -170,7 +165,7 @@ class MotionPhotoStorageManager(private val context: Context) {
             append("      <Item:Padding>0</Item:Padding>\n")
             append("     </rdf:li>\n")
 
-            // Item 2: MP4 视频（MotionPhoto）
+            // Item 2: MP4 视频
             append("     <rdf:li rdf:parseType=\"Resource\">\n")
             append("      <Item:Mime>video/mp4</Item:Mime>\n")
             append("      <Item:Semantic>MotionPhoto</Item:Semantic>\n")
