@@ -4,6 +4,50 @@
 
 ---
 
+## 2026-06-13
+
+### 修复音画不同步：音频截断到视频时长
+
+**问题**：录像合成时报 `VideoStorage ---->预录音频 PTS 异常! audio=29952ms >> video=21877ms`，输出 MP4 音频比视频长 8 秒。
+
+**根因**：视频环形缓冲在 maxBytes 上限处按 GOP 裁剪（OOM 修复后的正常行为），实际视频时长 < `PreRecordDuration.totalMs`；而音频 AAC 严格匹配 128kbps，缓冲接近满 30 秒。硬件 AVC 编码器在复杂场景实际码率常超出配置值 20-50%，导致视频被裁到 ~22s。这不是 PTS 错误，是数据真的少了。
+
+**修改文件**：
+- `hardware/storage/VideoStorageManager.kt` — `writeAudioFrames` 新增 `maxPtsUs` 参数，截断超出视频时长的音频帧
+
+**修改详情**：
+- `writeAudioFrames` 增加 `maxPtsUs: Long = Long.MAX_VALUE` 参数，循环中 `audioOffsetUs > maxPtsUs` 即 `break`（AAC PTS 单调递增）。
+- 4a（预录音频）和 4b（后录音频）两处调用都传 `maxPtsUs = videoDurationUs`。
+- 移除两处误导性的 `预录/后录音频 PTS 异常` ERROR 日志（PTS 没错，是数据少了）。
+- 截断时输出 DEBUG 日志：`音频截断到视频时长: 跳过 N 帧（超出 maxPts=Xms）`，便于排查。
+
+**影响**：
+- 输出 MP4 音视频始终同步，最坏情况音频比原始少 8 秒（视频没了我留音频也无意义）。
+- 视频数据没动，时长仍是 22s（这是环形缓冲的物理上限，要改善需要调大 maxBytes 或降低目标码率）。
+
+---
+
+### 修复待机 OOM：环形缓冲永不收缩
+
+**问题**：待机久了应用闪退 OOM，4K 比 1080p 显著更快触发。
+
+**根因**：`RingBufferRecorder.addToRingBuffer()` 的环形裁剪逻辑失效。旧代码要求"buffer 第 2 个元素恰好是关键帧"才丢弃第 1 个，但编码器 `KEY_I_FRAME_INTERVAL=2s`，意味着 buffer 中 99% 都是 P 帧，`break` 几乎每次触发，缓冲永不收缩。`drainEncoder` 每帧 `addLast`，`currentBytes` 单调上涨直到 OOM。4K@60fps 配 50Mbps，每秒产出 ~6.25MB，比 1080p@30 的 ~1MB 快 6 倍以上，因此更快触顶。
+
+**修改文件**：
+- `hardware/camera/RingBufferRecorder.kt` — 重写 `addToRingBuffer()` 裁剪逻辑
+
+**修改详情**：
+- 改为按 GOP 整段丢弃：当 `currentBytes > maxBytes` 时，找到第一个 `idx ≥ 1` 的关键帧作为新边界，把 `[0, keyIdx)` 的所有帧（即上一个 GOP 的尾巴）一次性 `removeFirst` 丢掉。
+- 找不到下一个关键帧时才 `break`（这种情况意味着当前 buffer 还不足一个完整 GOP 后续，无法安全裁剪；等下一个关键帧进来后自然恢复）。
+- 用 Kotlin `(1 until buffer.size).firstOrNull { ... }` 表达，避免逐帧 break。
+
+**影响**：
+- 待机内存从「单调增长直到 OOM」恢复为「按 maxBytes 上限的稳态环形」。
+- 4K@60fps 待机稳定占用 ≈ 187MB（maxBytes） + 一个 GOP 残余（~12MB），1080p@30 ≈ 30MB + 残余。
+- 不改变 CSD/KeyFrame/P-Frame 的写入路径，dump 出来的视频仍从 IDR 起始可正常解码。
+
+---
+
 ## 2026-06-08 (第二批)
 
 ### 动态照片添加音轨 + 魅族兼容性修复 + 封面画质提升

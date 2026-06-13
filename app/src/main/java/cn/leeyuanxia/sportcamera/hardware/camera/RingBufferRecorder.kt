@@ -393,21 +393,30 @@ class RingBufferRecorder(
 
     /**
      * 将帧写入环形缓冲，超容量时丢弃旧帧
+     *
+     * 裁剪策略：按 GOP 整段丢弃。当 currentBytes > maxBytes 时，找到第一个 idx≥1 的
+     * 关键帧作为新边界，把 [0, keyIdx) 的所有帧（即上一个 GOP 的尾部）一次性丢掉。
+     *
+     * 历史 bug：旧实现要求"buffer 第 2 个元素恰好是关键帧"才丢第 1 个，
+     * 但 KEY_I_FRAME_INTERVAL=2s 意味着 99% 的位置都是 P 帧，break 几乎必触发，
+     * 导致缓冲永不收缩、单调增长直到 OOM（4K@60fps 下数十秒即崩）。
      */
     private fun addToRingBuffer(frame: EncodedFrame) {
         buffer.addLast(frame)
         currentBytes += frame.data.size
 
-        // 超容量 → 从头部丢弃到下一个关键帧边界
+        // 超容量 → 整段丢弃最旧的 GOP（保留从下一个关键帧开始的部分）
         while (currentBytes > maxBytes && buffer.size > 1) {
-            val first = buffer.peekFirst() ?: break
-            val second = buffer.elementAtOrNull(1) ?: break
-            // 只在第二个帧是关键帧时才能丢弃第一个
-            if (second.isKeyFrame() || second.isConfigFrame()) {
-                buffer.removeFirst()
-                currentBytes -= first.data.size
-            } else {
-                break // 不能在非关键帧边界切割
+            // 找到第一个 idx >= 1 的关键帧作为裁剪起点
+            // 关键帧之前的所有帧可以作为前一个 GOP 的尾巴被丢弃
+            val nextKeyIdx = (1 until buffer.size).firstOrNull {
+                buffer.elementAt(it).isKeyFrame()
+            } ?: break // 当前 buffer 内没有下一个关键帧边界，无法安全裁剪
+
+            // 丢弃 [0, nextKeyIdx) 的所有帧
+            repeat(nextKeyIdx) {
+                val removed = buffer.removeFirst()
+                currentBytes -= removed.data.size
             }
         }
     }

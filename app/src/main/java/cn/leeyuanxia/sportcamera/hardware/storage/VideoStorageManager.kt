@@ -230,14 +230,10 @@ class VideoStorageManager(private val context: Context) {
                         frames = preAudioFrames,
                         ptsOffsetUs = 0L,
                         lastPtsUs = audioLastPtsUs,
+                        maxPtsUs = videoDurationUs,  // 截断到视频时长，保证音画同步
                         onProgress = { processed++; onProgress(processed.toFloat() / (dataFrames.size + allAudioFrames.size)) },
                     )
                     DebugLog.d(TAG, "预录音频已写入: ${preAudioFrames.size} 帧")
-
-                    // 合理性检查：音频 PTS 不应远超视频时长
-                    if (audioLastPtsUs > videoDurationUs + 5_000_000L) {
-                        DebugLog.e(TAG, "预录音频 PTS 异常! audio=${audioLastPtsUs/1000}ms >> video=${videoDurationUs/1000}ms，可能编码器 PTS 不正确")
-                    }
                 }
 
                 // 4b. 写入后录音频帧（PTS 从 preVideoDurationUs 开始）
@@ -248,14 +244,10 @@ class VideoStorageManager(private val context: Context) {
                         frames = audioFrames,
                         ptsOffsetUs = preVideoDurationUs,
                         lastPtsUs = audioLastPtsUs,
+                        maxPtsUs = videoDurationUs,  // 截断到视频时长，保证音画同步
                         onProgress = { processed++; onProgress(processed.toFloat() / (dataFrames.size + allAudioFrames.size)) },
                     )
                     DebugLog.d(TAG, "后录音频已写入: ${audioFrames.size} 帧")
-
-                    // 合理性检查
-                    if (audioLastPtsUs > videoDurationUs + 5_000_000L) {
-                        DebugLog.e(TAG, "后录音频 PTS 异常! audio=${audioLastPtsUs/1000}ms >> video=${videoDurationUs/1000}ms，可能编码器 PTS 不正确")
-                    }
                 }
             }
 
@@ -297,6 +289,9 @@ class VideoStorageManager(private val context: Context) {
      * @param baseTimeUs 该段音频的 startTimeUs 基准
      * @param ptsOffsetUs 在最终时间轴上的偏移（预录=0，后录=preVideoDurationUs）
      * @param lastPtsUs 上一段的最后 PTS（保证单调性）
+     * @param maxPtsUs 允许写入的最大 PTS（默认无限制）。超出此 PTS 的帧被丢弃，
+     *                 用于音画同步：视频环形缓冲可能因 maxBytes 裁剪导致实际时长短于音频，
+     *                 此时截断音频到视频时长，避免"视频已结束音频还在播"
      * @param onProgress 每写入一帧的回调
      * @return 最后写入的 PTS
      */
@@ -306,6 +301,7 @@ class VideoStorageManager(private val context: Context) {
         frames: List<AudioRecorder.EncodedAudioFrame>,
         ptsOffsetUs: Long,
         lastPtsUs: Long,
+        maxPtsUs: Long = Long.MAX_VALUE,
         onProgress: () -> Unit,
     ): Long {
         if (frames.isEmpty()) return lastPtsUs
@@ -321,16 +317,24 @@ class VideoStorageManager(private val context: Context) {
 
         var currentLastPtsUs = lastPtsUs
         var written = 0
+        var skippedByMaxPts = 0
 
         // 用第一帧 PTS 作为归一化基准
         // 很多设备上 MediaCodec AAC 编码器输出 PTS 从 0 开始，而非透传输入值
         val firstFramePtsUs = dataFrames.first().presentationTimeUs
         val lastFramePtsUs = dataFrames.last().presentationTimeUs
-        DebugLog.d(TAG, "音频段: ${dataFrames.size}帧, rawPTS范围=${firstFramePtsUs}~${lastFramePtsUs}, 偏移=${ptsOffsetUs/1000}ms")
+        DebugLog.d(TAG, "音频段: ${dataFrames.size}帧, rawPTS范围=${firstFramePtsUs}~${lastFramePtsUs}, 偏移=${ptsOffsetUs/1000}ms, maxPts=${if(maxPtsUs==Long.MAX_VALUE)"∞" else "${maxPtsUs/1000}ms"}")
 
         for (audioFrame in dataFrames) {
             val normalizedUs = audioFrame.presentationTimeUs - firstFramePtsUs
             val audioOffsetUs = normalizedUs + ptsOffsetUs
+
+            // 音画同步：超出视频时长的音频帧不再写入
+            // AAC 帧 PTS 单调递增，一旦超出即可 break
+            if (audioOffsetUs > maxPtsUs) {
+                skippedByMaxPts = dataFrames.size - written
+                break
+            }
 
             val writePtsUs = if (audioOffsetUs <= currentLastPtsUs) currentLastPtsUs + 1 else audioOffsetUs
             currentLastPtsUs = writePtsUs
@@ -346,6 +350,9 @@ class VideoStorageManager(private val context: Context) {
             muxer.writeSampleData(trackIndex, ByteBuffer.wrap(audioFrame.data), bufferInfo)
             written++
             onProgress()
+        }
+        if (skippedByMaxPts > 0) {
+            DebugLog.d(TAG, "音频截断到视频时长: 跳过 ${skippedByMaxPts} 帧（超出 maxPts=${maxPtsUs/1000}ms）")
         }
         DebugLog.d(TAG, "音频写入完成: ${written}帧, PTS范围=${ptsOffsetUs/1000}ms~${currentLastPtsUs/1000}ms")
         return currentLastPtsUs
